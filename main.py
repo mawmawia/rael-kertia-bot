@@ -1,11 +1,22 @@
+print("RAEL_KERTIA: Boot sequence initiated")
 import os
-import requests
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
-import uuid
-import asyncio
+print("RAEL_KERTIA: os imported")
 
 TOKEN = os.environ['BOT_TOKEN']
+print(f"RAEL_KERTIA: Token loaded: {TOKEN[:10]}...")
+
+import requests
+print("RAEL_KERTIA: requests imported")
+
+from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
+print("RAEL_KERTIA: telegram imports OK")
+
+from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
+print("RAEL_KERTIA: telegram.ext imports OK")
+
+import uuid
+import asyncio
+print("RAEL_KERTIA: All imports complete")
 
 CHAINS = {
     "eth": "1", 
@@ -47,8 +58,8 @@ async def get_token_data(chain_id, token):
         r = requests.get(url, timeout=10).json()
         if r.get("code") == 1 and r.get("result"):
             return r["result"][token.lower()]
-    except:
-        pass
+    except Exception as e:
+        print(f"GoPlus API Error: {e}")
     return None
 
 async def get_dexscreener_data(dex_chain, token):
@@ -69,8 +80,8 @@ async def get_dexscreener_data(dex_chain, token):
                     'url': p.get('url', f'https://dexscreener.com/{dex_chain}/{token}'),
                     'symbol': p.get('baseToken', {}).get('symbol', 'TOKEN')
                 }
-    except:
-        pass
+    except Exception as e:
+        print(f"DexScreener API Error: {e}")
     return None
 
 def calculate_score(data):
@@ -264,4 +275,63 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.strip
+    query = update.inline_query.query.strip().lower()
+    if not query.startswith("0x") or len(query) < 40: 
+        return
+
+    data, dex = await asyncio.gather(
+        get_token_data("1", query),
+        get_dexscreener_data("ethereum", query)
+    )
+    if not data: 
+        return
+
+    score, honeypot, tax, owner, mint, lp_locked, cooldown, hidden_tax, _, lp_pct, anti_whale, whale_risk = calculate_score(data)
+    verdict = "SAFE ✅" if score > 75 else "CAUTION ⚠️" if score > 45 else "RUG 🚨"
+    price = format_price(dex['price']) if dex else "N/A"
+    change1h = f"{dex['priceChange1h']:+.1f}%" if dex else ""
+    
+    title = f"Kertia: {verdict} ({score}/100) | ${price} {change1h}"
+    desc = f"Tax: {tax}% | LP: {lp_pct:.0f}% Locked"
+    if hidden_tax: desc += " | HIDDEN TAX"
+    if anti_whale: desc += " | ANTI-WHALE"
+    if honeypot: desc = "🚨 HONEYPOT DETECTED"
+    
+    msg_content = f"⚔️ **Rael_kertia Audit**\n"
+    msg_content += f"**Score:** `{score}/100` **{verdict}**\n"
+    msg_content += f"**Price:** `${price}` `{change1h}`\n"
+    msg_content += f"**Tax:** `{tax}%` | **LP:** `{'LOCKED' if lp_locked else 'UNLOCKED'}`\n"
+    if hidden_tax: msg_content += f"⚠️ **Hidden Tax - Trojan Missed This**\n"
+    if anti_whale: msg_content += f"⚠️ **Anti-Whale - Soft Honeypot**\n"
+    msg_content += f"\n[Chart](https://dexscreener.com/ethereum/{query})"
+    
+    results = [
+        InlineQueryResultArticle(
+            id=str(uuid.uuid4()),
+            title=title,
+            description=desc,
+            input_message_content=InputTextMessageContent(msg_content, parse_mode='Markdown', disable_web_page_preview=True)
+        )
+    ]
+    await update.inline_query.answer(results, cache_time=30)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.data == "snipe_promo":
+        await query.answer("Sniper module launching soon. Join @RaelKertia for early access.", show_alert=True)
+
+print("RAEL_KERTIA: Building application...")
+app = Application.builder().token(TOKEN).build()
+print("RAEL_KERTIA: Application built")
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("scan", scan))
+app.add_handler(CommandHandler("snipe", snipe))
+app.add_handler(CommandHandler("price", price))
+app.add_handler(CallbackQueryHandler(button_handler))
+app.add_handler(InlineQueryHandler(inline_query))
+print("RAEL_KERTIA: Handlers registered")
+
+print("RAEL_KERTIA: Starting polling...")
+app.run_polling()
+print("RAEL_KERTIA: Polling stopped")
