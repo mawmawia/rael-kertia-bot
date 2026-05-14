@@ -42,4 +42,14 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Honeypot: {'YES' if honeypot else 'No'}\n"
         msg += f"Total Tax: {tax}%\n"
         msg += f"Owner Risk: {'YES' if owner else 'No'}\n\n"
-        msg += "Rael_kertia protects. Trojan misses this
+        msg += "Rael_kertia protects. Trojan misses this."
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text("Scan failed. Chain overloaded or invalid address.")
+
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("scan", scan))
+app.run_polling()
