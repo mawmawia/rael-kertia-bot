@@ -12,10 +12,9 @@ CHAINS = {
     "base": "8453", 
     "bsc": "56",
     "arb": "42161",
-    "sol": "solana" # Prepped for Solana
+    "sol": "solana"
 }
 
-# BUGFIX: DexScreener uses different chain names than GoPlus
 DEX_CHAIN_MAP = {
     "1": "ethereum",
     "8453": "base",
@@ -23,8 +22,6 @@ DEX_CHAIN_MAP = {
     "42161": "arbitrum",
     "solana": "solana"
 }
-
-STATUS = {"safe": "🟢", "warn": "🟡", "danger": "🔴", "critical": "🚨"}
 
 def format_price(price):
     if price == 0: return "0.00"
@@ -34,7 +31,7 @@ def format_price(price):
     return f"{price:,.2f}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "⚔️ **RAEL_KERTIA v0.7 | Trojan Killer**\n\n"
+    msg = "⚔️ **RAEL_KERTIA v0.7.1 | Trojan Killer**\n\n"
     msg += "**Commands:**\n"
     msg += "/scan <chain> <0x...> - God Mode audit\n"
     msg += "/snipe <chain> <0x...> - Sniper dashboard\n"
@@ -85,8 +82,186 @@ def calculate_score(data):
     cooldown = data.get("is_trading_cooldown") == "1"
     hidden_tax = data.get("hidden_owner") == "1" or data.get("is_anti_whale") == "1"
     transfer_pausable = data.get("transfer_pausable") == "1"
-    anti_whale = data.get("is_anti_whale") == "1" # Soft honeypot
+    anti_whale = data.get("is_anti_whale") == "1"
     
-    # BUGFIX: Sum LP % across all locked addresses, not just first
     lp_holders = data.get("lp_holders", [])
-    total_lp_locked = sum([float(h.get("percent", 0)) for h in lp_holders if h.get("
+    total_lp_locked = sum([float(h.get("percent", 0)) for h in lp_holders if h.get("is_locked") == 1])
+    lp_locked = total_lp_locked > 95
+    
+    holders = data.get("holders", [])[:10]
+    holder_concentration = sum([float(h.get("percent", 0)) for h in holders])
+    whale_risk = holder_concentration > 50
+    
+    if honeypot: score -= 50
+    if tax > 15: score -= 20
+    elif tax > 5: score -= 10
+    if owner: score -= 15
+    if mint: score -= 10
+    if not lp_locked: score -= 15
+    if cooldown: score -= 10
+    if hidden_tax: score -= 20
+    if transfer_pausable: score -= 10
+    if anti_whale: score -= 10
+    if whale_risk: score -= 15
+    
+    return max(0, score), honeypot, tax, owner, mint, lp_locked, cooldown, hidden_tax, transfer_pausable, total_lp_locked, anti_whale, whale_risk
+
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/scan <chain> <address>`\nEx: `/scan base 0x1234...`", parse_mode='Markdown')
+        return
+    
+    chain_key = context.args[0].lower() if len(context.args) > 1 else "eth"
+    token_addr = context.args[1] if len(context.args) > 1 else context.args[0]
+    chain_id = CHAINS.get(chain_key, "1")
+    dex_chain = DEX_CHAIN_MAP.get(chain_id, "ethereum")
+    
+    status_msg = await update.message.reply_text("⚔️ `RAEL_KERTIA: Analyzing...`", parse_mode='Markdown')
+
+    try:
+        data, dex = await asyncio.gather(
+            get_token_data(chain_id, token_addr),
+            get_dexscreener_data(dex_chain, token_addr)
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ API Error: {str(e)[:50]}")
+        return
+
+    if not data:
+        await status_msg.edit_text("❌ Token not found or unsupported chain.")
+        return
+
+    score, hp, tax, owner, mint, lp_l, cool, hidden, pause, lp_p, whale, whale_risk = calculate_score(data)
+    
+    verdict = "SAFE ✅" if score > 75 else "CAUTION ⚠️" if score > 45 else "RUG RISK 🚨"
+    symbol = dex.get('symbol', 'TOKEN') if dex else 'TOKEN'
+    holders = data.get("holder_count", "0")
+    
+    report = f"⚔️ **RAEL_KERTIA AUDIT: ${symbol}**\n`{token_addr[:6]}...{token_addr[-4:]}` | `{chain_key.upper()}`\n\n"
+    report += f"🛡 **Score: {score}/100 | {verdict}**\n──────────────────────────────────\n"
+    report += f"• **Honeypot:** {'🚨 YES' if hp else '✅ No'}\n"
+    report += f"• **Taxes:** Buy/Sell `{tax}%` {'🚨' if tax > 15 else '⚠️' if tax > 5 else '✅'}\n"
+    report += f"• **LP Locked:** `{lp_p:.1f}%` {'✅' if lp_l else '❌ UNLOCKED'}\n"
+    report += f"• **Ownership:** {'⚠️ NOT RENOUNCED' if owner else '✅ Renounced'}\n"
+    report += f"• **Hidden Tax:** {'🚨 DETECTED' if hidden else '✅ None'}\n"
+    report += f"• **Anti-Whale:** {'⚠️ Enabled' if whale else '✅ None'}\n"
+    report += f"• **Mintable:** {'🚨 YES' if mint else '✅ No'}\n"
+    report += f"• **Cooldown:** {'⚠️ BOT TRAP' if cool else '✅ None'}\n"
+    report += f"• **Whale Risk:** {'⚠️ HIGH' if whale_risk else '✅ Low'}\n"
+
+    if dex:
+        report += f"──────────────────────────────────\n💰 **Live Alpha:**\n"
+        report += f"• Price: `${format_price(dex['price'])}`\n"
+        report += f"• 1h: `{'📈' if dex['priceChange1h'] > 0 else '📉'} {dex['priceChange1h']:+.1f}%` | 24h: `{dex['priceChange24h']:+.1f}%`\n"
+        report += f"• Liquidity: `${dex['liquidity']:,.0f}` | Holders: `{holders}`\n"
+
+    if hidden: report += f"\n⚠️ **Trojan didn't see this!** Hidden Tax detected.\n"
+    if whale: report += f"⚠️ **Soft Honeypot:** Anti-whale limits selling.\n"
+    if whale_risk: report += f"⚠️ **Whale Risk:** Top 10 hold >50%. Dump risk.\n"
+
+    chart_url = dex['url'] if dex else f"https://dexscreener.com/{dex_chain}/{token_addr}"
+    buttons = [[
+        InlineKeyboardButton("📊 Chart", url=chart_url),
+        InlineKeyboardButton("🛡 GoPlus Report", url=f"https://gopluslabs.io/token-security/{chain_id}/{token_addr}")
+    ]]
+    
+    await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+
+async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: `/snipe <chain> <0x...>`", parse_mode='Markdown')
+        return
+    
+    if len(context.args) == 1:
+        chain_key, token = "eth", context.args[0]
+    else:
+        chain_key, token = context.args[0].lower(), context.args[1]
+    
+    chain_id = CHAINS.get(chain_key, "1")
+    dex_chain = DEX_CHAIN_MAP.get(chain_id, "ethereum")
+    await update.message.reply_text(f"🎯 Loading sniper intel for `{token[:8]}...`", parse_mode='Markdown')
+    
+    data, dex = await asyncio.gather(
+        get_token_data(chain_id, token),
+        get_dexscreener_data(dex_chain, token)
+    )
+    
+    if not data:
+        await update.message.reply_text("No security data. Token too new or dead.")
+        return
+    
+    score, honeypot, tax, owner, mint, lp_locked, cooldown, hidden_tax, pausable, lp_pct, anti_whale, whale_risk = calculate_score(data)
+    
+    holders = data.get("holder_count", "0")
+    creator_pct = float(data.get("creator_percent", 0))
+    buy_tax = float(data.get("buy_tax", 0))
+    sell_tax = float(data.get("sell_tax", 0))
+    top_holders = data.get("holders", [])[:3]
+    
+    lp_amount = dex['liquidity'] if dex else 0
+    price = dex['price'] if dex else 0
+    
+    if score > 80 and not honeypot and lp_locked and creator_pct < 5 and not hidden_tax and lp_amount > 10000:
+        snipe_verdict = "SEND IT 🚀"
+    elif score > 50 and not honeypot and lp_amount > 5000:
+        snipe_verdict = "CAUTION ⚠️"
+    else:
+        snipe_verdict = "SKIP 🚨"
+    
+    msg = f"🎯 **Sniper Intel: {snipe_verdict}**\n"
+    msg += f"**Kertia:** `{score}/100`\n─────────────────────────────\n"
+    msg += f"`Honeypot {'YES - DO NOT BUY' if honeypot else 'SAFE'}`\n"
+    msg += f"`LP Locked {'YES ' + str(round(lp_pct,1)) + '%' if lp_locked else 'NO - INSTANT RUG'}`\n"
+    msg += f"`LP Size ${lp_amount:,.0f} {'✅' if lp_amount > 20000 else '⚠️'}`\n"
+    msg += f"`Price ${format_price(price)}`\n"
+    msg += f"`Buy/Sell Tax {buy_tax}% / {sell_tax}%`\n"
+    msg += f"`Hidden Tax {'YES - TROJAN MISSED' if hidden_tax else 'No'}`\n"
+    msg += f"`Anti-Whale {'YES - SOFT HP' if anti_whale else 'No'}`\n"
+    msg += f"`Owner {'CAN RUG' if owner else 'Renounced'}`\n"
+    msg += f"`Creator {creator_pct}% {'- DUMP RISK' if creator_pct > 10 else ''}`\n\n"
+    
+    if top_holders:
+        msg += "**Top 3 Holders:**\n"
+        for i, h in enumerate(top_holders, 1):
+            addr = h.get("address", "")[:6]
+            pct = h.get("percent", "0")
+            msg += f"`{i}. {addr}... - {pct}%`\n"
+    
+    if top_holders and float(top_holders[0].get("percent", 100)) < 5:
+        msg += f"\n💎 **SMART MONEY:** Top holder <5% = Distributed\n"
+    
+    chart_url = dex['url'] if dex else f"https://dexscreener.com/{dex_chain}/{token}"
+    msg += f"\n[📊 DexScreener]({chart_url})"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
+
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: `/price <chain> <0x...>`", parse_mode='Markdown')
+        return
+    
+    if len(context.args) == 1:
+        chain_key, token = "eth", context.args[0]
+    else:
+        chain_key, token = context.args[0].lower(), context.args[1]
+    
+    dex_chain = DEX_CHAIN_MAP.get(CHAINS.get(chain_key, "1"), "ethereum")
+    dex_data = await get_dexscreener_data(dex_chain, token)
+    if not dex_data:
+        await update.message.reply_text("No price data found. Token may not be listed yet.")
+        return
+    
+    msg = f"💰 **Price Data: {chain_key.upper()}**\n\n"
+    msg += f"**Price:** `${format_price(dex_data['price'])}`\n"
+    msg += f"**1h:** `{'📈' if dex_data['priceChange1h'] > 0 else '📉'} {dex_data['priceChange1h']:+.2f}%`\n"
+    msg += f"**24h:** `{'📈' if dex_data['priceChange24h'] > 0 else '📉'} {dex_data['priceChange24h']:+.2f}%`\n"
+    msg += f"**Volume 24h:** `${dex_data['volume24h']:,.0f}`\n"
+    msg += f"**Liquidity:** `${dex_data['liquidity']:,.0f}`\n"
+    msg += f"**FDV:** `${dex_data['fdv']:,.0f}`\n"
+    msg += f"**DEX:** `{dex_data['dexId']}`\n\n"
+    msg += f"[📊 Chart]({dex_data['url']})"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip
