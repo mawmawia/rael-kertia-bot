@@ -52,16 +52,16 @@ def format_price(price):
     return f"{price:,.2f}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "⚔️ **RAEL_KERTIA v0.7.2 | Trojan Killer**\n\n"
-    msg += "**Commands:**\n"
-    msg += "/scan <chain> <0x...> - God Mode audit\n"
-    msg += "/snipe <chain> <0x...> - Sniper dashboard\n"
-    msg += "/price <chain> <0x...> - Live chart data\n\n"
-    msg += "**Inline:** `@Rael_kertia_bot 0x...` in any group\n\n"
-    msg += "Chains: `eth`, `base`, `bsc`, `arb`, `sol`\n"
-    msg += f"_Threats Neutralized: `{total_scans}`_\n"
-    msg += "_We catch soft rugs Trojan misses._"
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    msg = "⚔️ <b>RAEL_KERTIA v0.7.2 | Trojan Killer</b>\n\n"
+    msg += "<b>Commands:</b>\n"
+    msg += "/scan &lt;chain&gt; &lt;0x...&gt; - God Mode audit\n"
+    msg += "/snipe &lt;chain&gt; &lt;0x...&gt; - Sniper dashboard\n"
+    msg += "/price &lt;chain&gt; &lt;0x...&gt; - Live chart data\n\n"
+    msg += "<b>Inline:</b> @Rael_kertia_bot 0x... in any group\n\n"
+    msg += "Chains: <code>eth</code>, <code>base</code>, <code>bsc</code>, <code>arb</code>, <code>sol</code>\n"
+    msg += f"<i>Threats Neutralized: <code>{total_scans}</code></i>\n"
+    msg += "<i>We catch soft rugs Trojan misses.</i>"
+    await update.message.reply_text(msg, parse_mode='HTML')
 
 async def get_token_data(chain_id, token):
     addr = token if chain_id == "solana" else token.lower()
@@ -128,7 +128,7 @@ def calculate_score(data):
     elif tax > 5: score -= 10
     if owner: score -= 15
     if mint: score -= 10
-    if not lp_locked: score -= 15
+    if not lp_locked: score -= 40 # Unlocked LP = instant rug risk
     if cooldown: score -= 10
     if hidden_tax: score -= 20
     if transfer_pausable: score -= 10
@@ -142,7 +142,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_scans += 1
     
     if not context.args:
-        await update.message.reply_text("❌ Usage: `/scan <chain> <address>`\nEx: `/scan base 0x1234...`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Usage: <code>/scan &lt;chain&gt; &lt;address&gt;</code>\nEx: <code>/scan base 0x1234...</code>", parse_mode='HTML')
         return
     
     chain_key = context.args[0].lower() if len(context.args) > 1 else "eth"
@@ -150,7 +150,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chain_id = CHAINS.get(chain_key, "1")
     dex_chain = DEX_CHAIN_MAP.get(chain_id, "ethereum")
     
-    status_msg = await update.message.reply_text("⚔️ `RAEL_KERTIA: Analyzing...`", parse_mode='Markdown')
+    status_msg = await update.message.reply_text("⚔️ <code>RAEL_KERTIA: Analyzing...</code>", parse_mode='HTML')
 
     try:
         data, dex = await asyncio.gather(
@@ -171,29 +171,29 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = dex.get('symbol', 'TOKEN') if dex else 'TOKEN'
     holders = data.get("holder_count", "0")
     
-    report = f"⚔️ **RAEL_KERTIA AUDIT: ${symbol}**\n`{token_addr[:6]}...{token_addr[-4:]}` | `{chain_key.upper()}`\n\n"
-    report += f"🛡 **Score: {score}/100 | {verdict}**\n──────────────────────────────────\n"
-    report += f"• **Honeypot:** {'🚨 YES' if hp else '✅ No'}\n"
-    report += f"• **Taxes:** Buy/Sell `{tax}%` {'🚨' if tax > 15 else '⚠️' if tax > 5 else '✅'}\n"
-    report += f"• **LP Locked:** `{lp_p:.1f}%` {'✅' if lp_l else '❌ UNLOCKED'}\n"
-    report += f"• **Ownership:** {'⚠️ NOT RENOUNCED' if owner else '✅ Renounced'}\n"
-    report += f"• **Hidden Tax:** {'🚨 DETECTED' if hidden else '✅ None'}\n"
-    report += f"• **Anti-Whale:** {'⚠️ Enabled' if whale else '✅ None'}\n"
-    report += f"• **Mintable:** {'🚨 YES' if mint else '✅ No'}\n"
-    report += f"• **Cooldown:** {'⚠️ BOT TRAP' if cool else '✅ None'}\n"
-    report += f"• **Whale Risk:** {'⚠️ HIGH' if whale_risk else '✅ Low'}\n"
+    report = f"⚔️ <b>RAEL_KERTIA AUDIT: ${symbol}</b>\n<code>{token_addr[:6]}...{token_addr[-4:]}</code> | <code>{chain_key.upper()}</code>\n\n"
+    report += f"🛡 <b>Score: {score}/100 | {verdict}</b>\n──────────────────────────────────\n"
+    report += f"• <b>Honeypot:</b> {'🚨 YES' if hp else '✅ No'}\n"
+    report += f"• <b>Taxes:</b> Buy/Sell <code>{tax}%</code> {'🚨' if tax > 15 else '⚠️' if tax > 5 else '✅'}\n"
+    report += f"• <b>LP Locked:</b> <code>{lp_p:.1f}%</code> {'✅' if lp_l else '❌ UNLOCKED'}\n"
+    report += f"• <b>Ownership:</b> {'⚠️ NOT RENOUNCED' if owner else '✅ Renounced'}\n"
+    report += f"• <b>Hidden Tax:</b> {'🚨 DETECTED' if hidden else '✅ None'}\n"
+    report += f"• <b>Anti-Whale:</b> {'⚠️ Enabled' if whale else '✅ None'}\n"
+    report += f"• <b>Mintable:</b> {'🚨 YES' if mint else '✅ No'}\n"
+    report += f"• <b>Cooldown:</b> {'⚠️ BOT TRAP' if cool else '✅ None'}\n"
+    report += f"• <b>Whale Risk:</b> {'⚠️ HIGH' if whale_risk else '✅ Low'}\n"
 
     if dex:
-        report += f"──────────────────────────────────\n💰 **Live Alpha:**\n"
-        report += f"• Price: `${format_price(dex['price'])}`\n"
-        report += f"• 1h: `{'📈' if dex['priceChange1h'] > 0 else '📉'} {dex['priceChange1h']:+.1f}%` | 24h: `{dex['priceChange24h']:+.1f}%`\n"
-        report += f"• Liquidity: `${dex['liquidity']:,.0f}` | Holders: `{holders}`\n"
+        report += f"──────────────────────────────────\n💰 <b>Live Alpha:</b>\n"
+        report += f"• Price: <code>${format_price(dex['price'])}</code>\n"
+        report += f"• 1h: <code>{'📈' if dex['priceChange1h'] > 0 else '📉'} {dex['priceChange1h']:+.1f}%</code> | 24h: <code>{dex['priceChange24h']:+.1f}%</code>\n"
+        report += f"• Liquidity: <code>${dex['liquidity']:,.0f}</code> | Holders: <code>{holders}</code>\n"
 
-    if hidden: report += f"\n⚠️ **Trojan didn't see this!** Hidden Tax detected.\n"
-    if whale: report += f"⚠️ **Soft Honeypot:** Anti-whale limits selling.\n"
-    if whale_risk: report += f"⚠️ **Whale Risk:** Top 10 hold >50%. Dump risk.\n"
+    if hidden: report += f"\n⚠️ <b>Trojan didn't see this!</b> Hidden Tax detected.\n"
+    if whale: report += f"⚠️ <b>Soft Honeypot:</b> Anti-whale limits selling.\n"
+    if whale_risk: report += f"⚠️ <b>Whale Risk:</b> Top 10 hold >50%. Dump risk.\n"
 
-    report += f"\n🛡 Scanned by Rael_Kertia | Threats Neutralized: `{total_scans}`"
+    report += f"\n🛡 <i>Scanned by Rael_Kertia | Threats Neutralized: <code>{total_scans}</code></i>"
 
     chart_url = dex['url'] if dex else f"https://dexscreener.com/{dex_chain}/{token_addr}"
     buttons = [[
@@ -201,11 +201,11 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🛡 GoPlus Report", url=f"https://gopluslabs.io/token-security/{chain_id}/{token_addr}")
     ]]
     
-    await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+    await status_msg.edit_text(report, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: `/snipe <chain> <0x...>`", parse_mode='Markdown')
+        await update.message.reply_text("Usage: <code>/snipe &lt;chain&gt; &lt;0x...&gt;</code>", parse_mode='HTML')
         return
     
     if len(context.args) == 1:
@@ -215,7 +215,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chain_id = CHAINS.get(chain_key, "1")
     dex_chain = DEX_CHAIN_MAP.get(chain_id, "ethereum")
-    await update.message.reply_text(f"🎯 Loading sniper intel for `{token[:8]}...`", parse_mode='Markdown')
+    await update.message.reply_text(f"🎯 Loading sniper intel for <code>{token[:8]}...</code>", parse_mode='HTML')
     
     data, dex = await asyncio.gather(
         get_token_data(chain_id, token),
@@ -244,36 +244,36 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         snipe_verdict = "SKIP 🚨"
     
-    msg = f"🎯 **Sniper Intel: {snipe_verdict}**\n"
-    msg += f"**Kertia:** `{score}/100`\n─────────────────────────────\n"
-    msg += f"`Honeypot {'YES - DO NOT BUY' if honeypot else 'SAFE'}`\n"
-    msg += f"`LP Locked {'YES ' + str(round(lp_pct,1)) + '%' if lp_locked else 'NO - INSTANT RUG'}`\n"
-    msg += f"`LP Size ${lp_amount:,.0f} {'✅' if lp_amount > 20000 else '⚠️'}`\n"
-    msg += f"`Price ${format_price(price)}`\n"
-    msg += f"`Buy/Sell Tax {buy_tax}% / {sell_tax}%`\n"
-    msg += f"`Hidden Tax {'YES - TROJAN MISSED' if hidden_tax else 'No'}`\n"
-    msg += f"`Anti-Whale {'YES - SOFT HP' if anti_whale else 'No'}`\n"
-    msg += f"`Owner {'CAN RUG' if owner else 'Renounced'}`\n"
-    msg += f"`Creator {creator_pct}% {'- DUMP RISK' if creator_pct > 10 else ''}`\n\n"
+    msg = f"🎯 <b>Sniper Intel: {snipe_verdict}</b>\n"
+    msg += f"<b>Kertia:</b> <code>{score}/100</code>\n─────────────────────────────\n"
+    msg += f"<code>Honeypot {'YES - DO NOT BUY' if honeypot else 'SAFE'}</code>\n"
+    msg += f"<code>LP Locked {'YES ' + str(round(lp_pct,1)) + '%' if lp_locked else 'NO - INSTANT RUG'}</code>\n"
+    msg += f"<code>LP Size ${lp_amount:,.0f} {'✅' if lp_amount > 20000 else '⚠️'}</code>\n"
+    msg += f"<code>Price ${format_price(price)}</code>\n"
+    msg += f"<code>Buy/Sell Tax {buy_tax}% / {sell_tax}%</code>\n"
+    msg += f"<code>Hidden Tax {'YES - TROJAN MISSED' if hidden_tax else 'No'}</code>\n"
+    msg += f"<code>Anti-Whale {'YES - SOFT HP' if anti_whale else 'No'}</code>\n"
+    msg += f"<code>Owner {'CAN RUG' if owner else 'Renounced'}</code>\n"
+    msg += f"<code>Creator {creator_pct}% {'- DUMP RISK' if creator_pct > 10 else ''}</code>\n\n"
     
     if top_holders:
-        msg += "**Top 3 Holders:**\n"
+        msg += "<b>Top 3 Holders:</b>\n"
         for i, h in enumerate(top_holders, 1):
             addr = h.get("address", "")[:6]
             pct = h.get("percent", "0")
-            msg += f"`{i}. {addr}... - {pct}%`\n"
+            msg += f"<code>{i}. {addr}... - {pct}%</code>\n"
     
     if top_holders and safe_float(top_holders[0].get("percent", 100)) < 5:
-        msg += f"\n💎 **SMART MONEY:** Top holder <5% = Distributed\n"
+        msg += f"\n💎 <b>SMART MONEY:</b> Top holder &lt;5% = Distributed\n"
     
     chart_url = dex['url'] if dex else f"https://dexscreener.com/{dex_chain}/{token}"
-    msg += f"\n[📊 DexScreener]({chart_url})"
+    msg += f"\n<a href='{chart_url}'>📊 DexScreener</a>"
     
-    await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
+    await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: `/price <chain> <0x...>`", parse_mode='Markdown')
+        await update.message.reply_text("Usage: <code>/price &lt;chain&gt; &lt;0x...&gt;</code>", parse_mode='HTML')
         return
     
     if len(context.args) == 1:
@@ -287,17 +287,17 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No price data found. Token may not be listed yet.")
         return
     
-    msg = f"💰 **Price Data: {chain_key.upper()}**\n\n"
-    msg += f"**Price:** `${format_price(dex_data['price'])}`\n"
-    msg += f"**1h:** `{'📈' if dex_data['priceChange1h'] > 0 else '📉'} {dex_data['priceChange1h']:+.2f}%`\n"
-    msg += f"**24h:** `{'📈' if dex_data['priceChange24h'] > 0 else '📉'} {dex_data['priceChange24h']:+.2f}%`\n"
-    msg += f"**Volume 24h:** `${dex_data['volume24h']:,.0f}`\n"
-    msg += f"**Liquidity:** `${dex_data['liquidity']:,.0f}`\n"
-    msg += f"**FDV:** `${dex_data['fdv']:,.0f}`\n"
-    msg += f"**DEX:** `{dex_data['dexId']}`\n\n"
-    msg += f"[📊 Chart]({dex_data['url']})"
+    msg = f"💰 <b>Price Data: {chain_key.upper()}</b>\n\n"
+    msg += f"<b>Price:</b> <code>${format_price(dex_data['price'])}</code>\n"
+    msg += f"<b>1h:</b> <code>{'📈' if dex_data['priceChange1h'] > 0 else '📉'} {dex_data['priceChange1h']:+.2f}%</code>\n"
+    msg += f"<b>24h:</b> <code>{'📈' if dex_data['priceChange24h'] > 0 else '📉'} {dex_data['priceChange24h']:+.2f}%</code>\n"
+    msg += f"<b>Volume 24h:</b> <code>${dex_data['volume24h']:,.0f}</code>\n"
+    msg += f"<b>Liquidity:</b> <code>${dex_data['liquidity']:,.0f}</code>\n"
+    msg += f"<b>FDV:</b> <code>${dex_data['fdv']:,.0f}</code>\n"
+    msg += f"<b>DEX:</b> <code>{dex_data['dexId']}</code>\n\n"
+    msg += f"<a href='{dex_data['url']}'>📊 Chart</a>"
     
-    await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
+    await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
@@ -322,20 +322,20 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if anti_whale: desc += " | ANTI-WHALE"
     if honeypot: desc = "🚨 HONEYPOT DETECTED"
     
-    msg_content = f"⚔️ **Rael_kertia Audit**\n"
-    msg_content += f"**Score:** `{score}/100` **{verdict}**\n"
-    msg_content += f"**Price:** `${price}` `{change1h}`\n"
-    msg_content += f"**Tax:** `{tax}%` | **LP:** `{'LOCKED' if lp_locked else 'UNLOCKED'}`\n"
-    if hidden_tax: msg_content += f"⚠️ **Hidden Tax - Trojan Missed This**\n"
-    if anti_whale: msg_content += f"⚠️ **Anti-Whale - Soft Honeypot**\n"
-    msg_content += f"\n[Chart](https://dexscreener.com/ethereum/{query})"
+    msg_content = f"⚔️ <b>Rael_kertia Audit</b>\n"
+    msg_content += f"<b>Score:</b> <code>{score}/100</code> <b>{verdict}</b>\n"
+    msg_content += f"<b>Price:</b> <code>${price}</code> <code>{change1h}</code>\n"
+    msg_content += f"<b>Tax:</b> <code>{tax}%</code> | <b>LP:</b> <code>{'LOCKED' if lp_locked else 'UNLOCKED'}</code>\n"
+    if hidden_tax: msg_content += f"⚠️ <b>Hidden Tax - Trojan Missed This</b>\n"
+    if anti_whale: msg_content += f"⚠️ <b>Anti-Whale - Soft Honeypot</b>\n"
+    msg_content += f"\n<a href='https://dexscreener.com/ethereum/{query}'>Chart</a>"
     
     results = [
         InlineQueryResultArticle(
             id=str(uuid.uuid4()),
             title=title,
             description=desc,
-            input_message_content=InputTextMessageContent(msg_content, parse_mode='Markdown', disable_web_page_preview=True)
+            input_message_content=InputTextMessageContent(msg_content, parse_mode='HTML', disable_web_page_preview=True)
         )
     ]
     await update.inline_query.answer(results, cache_time=30)
