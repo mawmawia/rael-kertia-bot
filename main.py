@@ -1,7 +1,9 @@
 import os
 import requests
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
+import uuid
+import asyncio
 
 TOKEN = os.environ['BOT_TOKEN']
 
@@ -9,76 +11,82 @@ CHAINS = {
     "eth": "1", 
     "base": "8453", 
     "bsc": "56",
-    "arb": "42161"
+    "arb": "42161",
+    "sol": "solana" # Prepped for Solana
 }
 
+# BUGFIX: DexScreener uses different chain names than GoPlus
+DEX_CHAIN_MAP = {
+    "1": "ethereum",
+    "8453": "base",
+    "56": "bsc",
+    "42161": "arbitrum",
+    "solana": "solana"
+}
+
+STATUS = {"safe": "🟢", "warn": "🟡", "danger": "🔴", "critical": "🚨"}
+
+def format_price(price):
+    if price == 0: return "0.00"
+    if price < 0.000001: return f"{price:.10f}"
+    if price < 0.01: return f"{price:.6f}"
+    if price < 1: return f"{price:.4f}"
+    return f"{price:,.2f}"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "Rael_kertia online. Trojan Killer active.\n\n"
-    msg += "Usage: /scan <chain> <0x...>\n"
-    msg += "Chains: eth, base, bsc, arb\n"
-    msg += "Ex: /scan base 0x1234...\n\n"
-    msg += "Kertia Score beats Trojan."
-    await update.message.reply_text(msg)
+    msg = "⚔️ **RAEL_KERTIA v0.7 | Trojan Killer**\n\n"
+    msg += "**Commands:**\n"
+    msg += "/scan <chain> <0x...> - God Mode audit\n"
+    msg += "/snipe <chain> <0x...> - Sniper dashboard\n"
+    msg += "/price <chain> <0x...> - Live chart data\n\n"
+    msg += "**Inline:** `@Rael_kertia_bot 0x...` in any group\n\n"
+    msg += "Chains: `eth`, `base`, `bsc`, `arb`, `sol`\n"
+    msg += "_We catch soft rugs Trojan misses._"
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /scan <chain> <0x...>\nEx: /scan base 0x1234...")
-        return
-    
-    if len(context.args) == 1:
-        chain, token = "eth", context.args[0]
-    else:
-        chain, token = context.args[0].lower(), context.args[1]
-    
-    if chain not in CHAINS:
-        await update.message.reply_text(f"Chain '{chain}' not supported. Use: eth, base, bsc, arb")
-        return
-        
-    chain_id = CHAINS[chain]
-    await update.message.reply_text(f"Scanning {token[:8]}... on {chain.upper()} 🔍")
-    
+async def get_token_data(chain_id, token):
+    url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={token}"
     try:
-        url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={token}"
         r = requests.get(url, timeout=10).json()
-        
-        if r.get("code") != 1 or not r.get("result"):
-            await update.message.reply_text("Invalid token or chain not supported yet.")
-            return
-            
-        data = r["result"][token.lower()]
-        
-        honeypot = data.get("is_honeypot") == "1"
-        tax = float(data.get("buy_tax", 0)) + float(data.get("sell_tax", 0))
-        owner = data.get("can_take_back_ownership") == "1"
-        mint = data.get("is_mintable") == "1"
-        lp_status = data.get("lp_holders", [])
-        lp_locked = len(lp_status) > 0 and float(lp_status[0].get("percent", 0)) > 95
-        
-        score = 100
-        if honeypot: score -= 50
-        if tax > 10: score -= 20
-        if owner: score -= 15
-        if mint: score -= 10
-        if not lp_locked: score -= 15
-        score = max(0, score)
-        
-        verdict = "SAFE" if score > 70 else "CAUTION" if score > 40 else "RUG RISK"
-        
-        msg = f"Kertia Score: {score}/100\nVerdict: {verdict} {'✅' if score>70 else '⚠️' if score>40 else '🚨'}\n"
-        msg += f"Chain: {chain.upper()}\n\n"
-        msg += f"Honeypot: {'YES' if honeypot else 'No'}\n"
-        msg += f"Total Tax: {tax}%\n"
-        msg += f"Owner Risk: {'YES' if owner else 'No'}\n"
-        msg += f"Can Mint: {'YES' if mint else 'No'}\n"
-        msg += f"LP Locked: {'YES' if lp_locked else 'NO - RUG POSSIBLE'}\n\n"
-        msg += "Rael_kertia protects. Trojan misses this."
-        
-        await update.message.reply_text(msg)
-        
-    except Exception as e:
-        await update.message.reply_text("Scan failed. API timeout or invalid address.")
+        if r.get("code") == 1 and r.get("result"):
+            return r["result"][token.lower()]
+    except:
+        pass
+    return None
 
-app = Application.builder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("scan", scan))
-app.run_polling()
+async def get_dexscreener_data(dex_chain, token):
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
+    try:
+        r = requests.get(url, timeout=5).json()
+        pairs = r.get('pairs', [])
+        for p in pairs:
+            if p.get('chainId') == dex_chain:
+                return {
+                    'price': float(p.get('priceUsd', 0)),
+                    'priceChange1h': float(p.get('priceChange', {}).get('h1', 0)),
+                    'priceChange24h': float(p.get('priceChange', {}).get('h24', 0)),
+                    'volume24h': float(p.get('volume', {}).get('h24', 0)),
+                    'liquidity': float(p.get('liquidity', {}).get('usd', 0)),
+                    'fdv': float(p.get('fdv', 0)),
+                    'dexId': p.get('dexId', 'Unknown'),
+                    'url': p.get('url', f'https://dexscreener.com/{dex_chain}/{token}'),
+                    'symbol': p.get('baseToken', {}).get('symbol', 'TOKEN')
+                }
+    except:
+        pass
+    return None
+
+def calculate_score(data):
+    score = 100
+    honeypot = data.get("is_honeypot") == "1"
+    tax = float(data.get("buy_tax", 0)) + float(data.get("sell_tax", 0))
+    owner = data.get("can_take_back_ownership") == "1"
+    mint = data.get("is_mintable") == "1"
+    cooldown = data.get("is_trading_cooldown") == "1"
+    hidden_tax = data.get("hidden_owner") == "1" or data.get("is_anti_whale") == "1"
+    transfer_pausable = data.get("transfer_pausable") == "1"
+    anti_whale = data.get("is_anti_whale") == "1" # Soft honeypot
+    
+    # BUGFIX: Sum LP % across all locked addresses, not just first
+    lp_holders = data.get("lp_holders", [])
+    total_lp_locked = sum([float(h.get("percent", 0)) for h in lp_holders if h.get("
