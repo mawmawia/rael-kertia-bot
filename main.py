@@ -1,201 +1,235 @@
 import os
-import aiohttp
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import aiohttp
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from dotenv import load_dotenv
+from telegram.error import Conflict
 
-load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+BIRDEYE_KEY = os.getenv("BIRDEYE_API_KEY")
 
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-BIRDEYE_KEY = os.getenv('BIRDEYE_API_KEY')
+print("Kertia starting...")
 
-async def scan_token_godmode(chain: str, address: str) -> str:
-    chain_map = {
-        'eth': '1', 'ethereum': '1',
-        'bsc': '56', 'bnb': '56', 
-        'base': '8453',
-        'arb': '42161', 'arbitrum': '42161',
-        'sol': 'solana', 'solana': 'solana',
-        'poly': '137', 'polygon': '137'
-    }
-    chain_map_birdeye = {
-        'eth': 'ethereum', 'ethereum': 'ethereum',
-        'bsc': 'bsc', 'bnb': 'bsc', 
-        'base': 'base',
-        'arb': 'arbitrum', 'arbitrum': 'arbitrum',
-        'sol': 'solana', 'solana': 'solana',
-        'poly': 'polygon', 'polygon': 'polygon'
-    }
-    
-    chain_id = chain_map.get(chain.lower())
-    birdeye_chain = chain_map_birdeye.get(chain.lower())
-    
-    if not chain_id or not birdeye_chain:
-        return f"❌ Unsupported chain: `{chain}`. Use: eth, bsc, base, arb, sol"
-    
-    timeout = aiohttp.ClientTimeout(total=8)
-    
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Birdeye for price/MC/LP
-            birdeye_url = f"https://public-api.birdeye.so/defi/token_overview?address={address}"
-            birdeye_headers = {"X-API-KEY": BIRDEYE_KEY, "x-chain": birdeye_chain}
-            
-            # GoPlus for security
-            goplus_url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={address}"
-            
-            birdeye_task = session.get(birdeye_url, headers=birdeye_headers)
-            goplus_task = session.get(goplus_url)
-            
-            birdeye_res, goplus_res = await asyncio.gather(birdeye_task, goplus_task)
-            
-            # Parse Birdeye
-            bd_data = {}
-            if birdeye_res.status == 200:
-                bd_data = (await birdeye_res.json()).get('data', {})
-            
-            # Parse GoPlus
-            gp_data = {}
-            if goplus_res.status == 200:
-                gp_json = await goplus_res.json()
-                gp_data = gp_json.get('result', {}).get(address.lower(), {})
-            
-            if not bd_data and not gp_data:
-                return "❌ Token not found on Birdeye or GoPlus. Check chain/address."
-            
-            # Combine data
-            name = bd_data.get('name') or gp_data.get('token_name', 'Unknown')
-            symbol = bd_data.get('symbol') or gp_data.get('token_symbol', '?')
-            price = bd_data.get('price', 0) or 0
-            mc = bd_data.get('mc', 0) or 0
-            liquidity = bd_data.get('liquidity', 0) or 0
-            holder = bd_data.get('holder', 0) or int(gp_data.get('holder_count', 0))
-            v24h = bd_data.get('v24hUSD', 0) or 0
-            lp_locked = bd_data.get('lpLockedPct', 0) or 0
-            v1h = bd_data.get('v1hChangePercent', 0) or 0
-            v24h_pct = bd_data.get('v24hChangePercent', 0) or 0
-            
-            # GoPlus security flags
-            is_honeypot = gp_data.get('is_honeypot', '0') == '1'
-            buy_tax = float(gp_data.get('buy_tax', '0')) * 100
-            sell_tax = float(gp_data.get('sell_tax', '0')) * 100
-            owner_address = gp_data.get('owner_address', '')
-            owner_renounced = owner_address in ['', '0x0000000000000000', '0x000000000000000000000000000000000000dead']
-            is_mintable = gp_data.get('is_mintable', '0') == '1'
-            can_take_ownership = gp_data.get('can_take_back_ownership', '0') == '1'
-            is_anti_whale = gp_data.get('is_anti_whale', '0') == '1'
-            trading_cooldown = gp_data.get('trading_cooldown', '0') == '1'
-            
-            # Calculate Score
-            score = 100
-            threats = 0
-            if is_honeypot: score -= 50; threats += 1
-            if buy_tax > 10 or sell_tax > 10: score -= 20; threats += 1
-            if lp_locked < 50: score -= 15; threats += 1
-            if liquidity < 10000: score -= 10
-            if is_mintable: score -= 15; threats += 1
-            if can_take_ownership: score -= 10
-            if not owner_renounced: score -= 10
-            score = max(0, score)
-            
-            risk_level = "SAFE" if score >= 70 else "MEDIUM RISK" if score >= 40 else "RUG RISK"
-            risk_emoji = "✅" if score >= 70 else "⚠️" if score >= 40 else "🚨"
-            
-            # Hidden tax logic
-            hidden_tax_text = "🚨 DETECTED" if buy_tax > 5 or sell_tax > 5 else "✅ None"
-            trojan_warning = "\n⚠️ **Trojan didn't see this!** Hidden Tax detected." if buy_tax > 5 or sell_tax > 5 else ""
-            soft_hp_warning = "\n⚠️ **Soft Honeypot:** Anti-whale limits selling." if is_anti_whale else ""
-            
-            return f"""
-⚔️ **RAEL_KERTIA AUDIT: ${symbol}**
-`{address[:6]}...{address[-4:]}` | {chain.upper()}
-
-🛡️ **Score: {score}/100 | {risk_level}** {risk_emoji}
-——————————————————
-- **Honeypot:** {'🚨 Yes' if is_honeypot else '✅ No'}
-- **Taxes:** Buy {buy_tax:.1f}% / Sell {sell_tax:.1f}% {'✅' if buy_tax < 5 and sell_tax < 5 else '⚠️'}
-- **LP Locked:** {lp_locked:.1f}% {'✅' if lp_locked >= 50 else '❌ UNLOCKED'}
-- **Ownership:** {'✅ Renounced' if owner_renounced else '⚠️ Not Renounced'}
-- **Hidden Tax:** {hidden_tax_text}
-- **Anti-Whale:** {'⚠️ Enabled' if is_anti_whale else '✅ None'}
-- **Mintable:** {'🚨 Yes' if is_mintable else '✅ No'}
-- **Cooldown:** {'⚠️ Yes' if trading_cooldown else '✅ None'}
-- **Whale Risk:** {'⚠️ High' if can_take_ownership else '✅ Low'}
-——————————————————
-💰 **Live Alpha:**
-- **Price:** ${price:.8f}
-- **1h:** {v1h:+.1f}% | **24h:** {v24h_pct:+.1f}%
-- **Liquidity:** ${liquidity:,.0f} | **Holders:** {holder:,}
-{trojan_warning}{soft_hp_warning}
-
-⚡ **Scanned by Rael_Kertia | Threats Neutralized: {threats}**
-"""
-            
-    except asyncio.TimeoutError:
-        return "❌ API timeout. Try again."
-    except Exception as e:
-        return f"❌ Scan error: {str(e)[:100]}"
+# Chain mapping for GoPlus + Birdeye
+CHAIN_MAP = {
+    'eth': '1', 
+    'base': '8453', 
+    'bsc': '56', 
+    'arb': '42161', 
+    'op': '10', 
+    'poly': '137', 
+    'avax': '43114'
+}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚔️ **RAEL_KERTIA v0.7.2 | Trojan Killer**\n\n"
-        "Commands:\n"
-        "/scan <chain> <0x...> - God Mode audit\n\n"
-        "Chains: eth, base, bsc, arb, sol\n"
-        "We catch soft rugs Trojan misses.",
+        "⚔️ **RAEL_KERTIA | TROJAN KILLER**\n\n"
+        "Deep contract scans + Snipe protection for Base, ETH, BSC.\n\n"
+        "**Commands:**\n"
+        "`/scan <chain> <address>` - Full token audit\n"
+        "`/snipecheck <chain> <address>` - Pre-launch safety check\n\n"
+        "**Example:** `/scan base 0x4ed4e862860bed51a99a7b96cf246c67a12d5e3d`\n\n"
+        "⚡ Zero fees. Max alpha.",
         parse_mode='Markdown'
     )
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 2:
         await update.message.reply_text(
-            "**Usage:** `/scan <chain> <address>`\n"
-            "**Example:** `/scan eth 0x4ed4e862860bed51a99a7b96cf246c67a12d5e3d`\n"
-            "**Chains:** eth, bsc, base, arb, sol",
+            "**Usage:** `/scan <chain> <address>`\n**Example:** `/scan base 0x...`",
             parse_mode='Markdown'
         )
         return
     
     chain, address = context.args
-    msg = await update.message.reply_text("🔍 Scanning...")
-    
-    result = await scan_token_godmode(chain, address)
-    
-    # Add buttons
-    keyboard = [
-        [InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{chain}/{address}"),
-         InlineKeyboardButton("🛡️ GoPlus", url=f"https://gopluslabs.io/token-security/{chain_map.get(chain.lower(), '1')}/{address}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await msg.edit_text(result, parse_mode='Markdown', reply_markup=reply_markup, disable_web_page_preview=True)
-
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Kertia online ⚡")
-
-def main():
-    print("Kertia starting...")
-    if not TELEGRAM_TOKEN:
-        print("ERROR: TELEGRAM_TOKEN not set")
+    chain_id = CHAIN_MAP.get(chain.lower())
+    if not chain_id:
+        await update.message.reply_text(
+            f"❌ Unsupported chain: `{chain}`\nUse: eth, base, bsc, arb, op, poly, avax",
+            parse_mode='Markdown'
+        )
         return
-    if not BIRDEYE_KEY:
-        print("ERROR: BIRDEYE_API_KEY not set")
+    
+    msg = await update.message.reply_text("⚔️ Running GodMode scan...")
+    
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # GoPlus Security API
+            gp_url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={address}"
+            # Birdeye Price API  
+            be_url = f"https://public-api.birdeye.so/defi/token_overview?address={address}"
+            headers = {"X-API-KEY": BIRDEYE_KEY} if BIRDEYE_KEY else {}
+            
+            gp_task = session.get(gp_url)
+            be_task = session.get(be_url, headers=headers)
+            
+            gp_res, be_res = await asyncio.gather(gp_task, be_task)
+            gp_data = (await gp_res.json()).get('result', {}).get(address.lower(), {})
+            be_data = (await be_res.json()).get('data', {}) if be_res.status == 200 else {}
+            
+            if not gp_data:
+                await msg.edit_text("❌ Token not found on GoPlus. Check chain + address.")
+                return
+            
+            # Parse GoPlus
+            is_hp = gp_data.get('is_honeypot', '0') == '1'
+            buy_tax = float(gp_data.get('buy_tax', '0')) * 100
+            sell_tax = float(gp_data.get('sell_tax', '0')) * 100
+            owner = gp_data.get('owner_address', 'None')
+            can_mint = gp_data.get('is_mintable', '0') == '1'
+            can_pause = gp_data.get('trading_pausable', '0') == '1'
+            owner_renounced = owner in ['', '0x0000000000000000000000000000000000000000', 'None']
+            
+            # Parse Birdeye
+            price = be_data.get('price', 0)
+            mcap = be_data.get('mc', 0)
+            liquidity = be_data.get('liquidity', 0)
+            symbol = gp_data.get('token_symbol', be_data.get('symbol', '?'))
+            
+            # Score calc
+            score = 100
+            if is_hp: score -= 50
+            if buy_tax > 10: score -= 20
+            if sell_tax > 10: score -= 20
+            if can_mint: score -= 15
+            if can_pause: score -= 15
+            if not owner_renounced: score -= 10
+            score = max(0, score)
+            
+            verdict = "🟢 SAFE" if score > 75 else "🟡 RISKY" if score > 40 else "🔴 SCAM"
+            
+            result = f"""
+⚔️ **RAEL_KERTIA AUDIT: ${symbol}**
+`{address[:6]}...{address[-4:]}` | {chain.upper()}
+——————————————————
+**{verdict} | Score: {score}/100**
+
+**Security:**
+- **Honeypot:** {'🚨 YES' if is_hp else '✅ No'}
+- **Buy Tax:** {buy_tax:.1f}% {'🚨' if buy_tax > 10 else '⚠️' if buy_tax > 5 else '✅'}
+- **Sell Tax:** {sell_tax:.1f}% {'🚨' if sell_tax > 10 else '⚠️' if sell_tax > 5 else '✅'}
+- **Owner:** {'✅ Renounced' if owner_renounced else f'⚠️ {owner[:10]}...'}
+- **Mintable:** {'🚨 Yes' if can_mint else '✅ No'}
+- **Pausable:** {'🚨 Yes' if can_pause else '✅ No'}
+
+**Market:**
+- **Price:** ${price:.8f}
+- **MC:** ${mcap:,.0f}
+- **Liquidity:** ${liquidity:,.0f} {'⚠️ Low' if liquidity < 10000 else '✅'}
+
+⚡ **Trojan Killer by Rael_Kertia**
+"""
+            await msg.edit_text(result, parse_mode='Markdown')
+            
+    except asyncio.TimeoutError:
+        await msg.edit_text("❌ API timeout. Try again in 10s.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Scan failed: {str(e)[:150]}")
+
+async def snipecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "**Usage:** `/snipecheck <chain> <address>`\n"
+            "**Example:** `/snipecheck base 0x...`\n"
+            "Checks if token is safe to snipe before LP add",
+            parse_mode='Markdown'
+        )
+        return
+    
+    chain, address = context.args
+    chain_id = CHAIN_MAP.get(chain.lower())
+    if not chain_id:
+        await update.message.reply_text(f"❌ Unsupported chain: `{chain}`", parse_mode='Markdown')
         return
         
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    msg = await update.message.reply_text("🎯 Running snipe pre-check...")
+    
+    timeout = aiohttp.ClientTimeout(total=8)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={address}"
+            async with session.get(url) as res:
+                data = (await res.json()).get('result', {}).get(address.lower(), {})
+            
+            if not data:
+                await msg.edit_text("❌ Token not found. Check chain + address.")
+                return
+            
+            # Snipe-specific flags
+            is_honeypot = data.get('is_honeypot', '0') == '1'
+            buy_tax = float(data.get('buy_tax', '0')) * 100
+            sell_tax = float(data.get('sell_tax', '0')) * 100
+            can_mint = data.get('is_mintable', '0') == '1'
+            owner_renounced = data.get('owner_address', '') in ['', '0x0000000000000000']
+            trading_pausable = data.get('trading_pausable', '0') == '1'
+            can_change_fee = data.get('slippage_modifiable', '0') == '1'
+            cannot_buy = data.get('cannot_buy', '0') == '1'
+            symbol = data.get('token_symbol', '?')
+            
+            # Verdict logic
+            verdict = "✅ SAFE TO SNIPE"
+            color = "✅"
+            if is_honeypot or buy_tax > 49 or cannot_buy:
+                verdict = "🛑 DO NOT SNIPE | Honeypot"
+                color = "🚨"
+            elif can_mint or trading_pausable:
+                verdict = "⚠️ HIGH RISK | Dev has controls"
+                color = "⚠️"
+            elif sell_tax > 20:
+                verdict = "⚠️ RISKY | High sell tax"
+                color = "⚠️"
+            
+            # Slippage calc
+            recommended_slip = max(12, int(buy_tax + 5))
+            if recommended_slip > 49: recommended_slip = 49
+            
+            result = f"""
+🎯 **SNIPE READINESS: ${symbol}**
+`{address[:6]}...{address[-4:]}` | {chain.upper()}
+——————————————————
+{color} **VERDICT: {verdict}**
+
+**Launch Traps:**
+- **Honeypot:** {'🚨 Yes' if is_honeypot else '✅ No'}
+- **Cannot Buy:** {'🚨 Yes' if cannot_buy else '✅ No'}
+- **Buy Tax:** {buy_tax:.1f}% {'🚨' if buy_tax > 20 else '⚠️' if buy_tax > 5 else '✅'}
+- **Sell Tax:** {sell_tax:.1f}% {'🚨' if sell_tax > 20 else '⚠️' if sell_tax > 5 else '✅'}
+- **Mintable:** {'🚨 Yes' if can_mint else '✅ No'}
+- **Pausable Trading:** {'🚨 Yes' if trading_pausable else '✅ No'}
+- **Owner Renounced:** {'✅ Yes' if owner_renounced else '⚠️ No'}
+- **Tax Modifiable:** {'⚠️ Yes' if can_change_fee else '✅ No'}
+——————————————————
+**Recommended Snipe Settings:**
+Gas: 0.008 ETH | Slippage: {recommended_slip}%
+
+⚡ **Rael_Kertia Sniper Guard**
+"""
+            await msg.edit_text(result, parse_mode='Markdown')
+            
+    except asyncio.TimeoutError:
+        await msg.edit_text("❌ API timeout. Try again.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Snipe check failed: {str(e)[:100]}")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    # This catches the Conflict error and prevents crash loops
+    if isinstance(context.error, Conflict):
+        print("Conflict error caught - another instance was running. Resolved.")
+        return
+    print(f"Exception while handling update: {context.error}")
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scan", scan))
-    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("snipecheck", snipecheck))
+    app.add_error_handler(error_handler)
     
     print("Bot ready - polling Telegram")
-    app.run_polling()
+    # drop_pending_updates=True is the key fix for Conflict errors
+    app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__":
-    # Fix chain_map scope issue for buttons
-    chain_map = {
-        'eth': '1', 'ethereum': '1', 'bsc': '56', 'bnb': '56', 
-        'base': '8453', 'arb': '42161', 'arbitrum': '42161',
-        'poly': '137', 'polygon': '137'
-    }
+if __name__ == '__main__':
     main()
