@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import requests
+import aiohttp
 import os
 from dotenv import load_dotenv
 
@@ -15,10 +15,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-def scan_token_birdeye(chain, address):
+async def scan_token_birdeye(chain: str, address: str) -> str:
     """
-    Main scanner using Birdeye API
-    Replaces GoPlus - 10x faster, 99% uptime
+    Main scanner using Birdeye API (Asynchronous)
     """
     chain_map = {
         'eth': 'ethereum', 'ethereum': 'ethereum',
@@ -39,44 +38,48 @@ def scan_token_birdeye(chain, address):
         "x-chain": birdeye_chain
     }
     
+    # Use aiohttp ClientSession with a 5-second total timeout
+    timeout = aiohttp.ClientTimeout(total=5)
     try:
-        r = requests.get(url, headers=headers, timeout=3)
-        
-        if r.status_code == 401:
-            return "❌ Birdeye API key invalid. Check Railway Variables."
-        if r.status_code == 429:
-            return "❌ Rate limited. Wait 60s or upgrade Birdeye plan."
-        if r.status_code != 200:
-            return f"❌ Token not found. Check chain/address."
-        
-        data = r.json().get('data', {})
-        
-        # Parse Birdeye response
-        name = data.get('name', 'Unknown')
-        symbol = data.get('symbol', '?')
-        mc = data.get('mc', 0) or 0
-        liquidity = data.get('liquidity', 0) or 0
-        holder = data.get('holder', 0) or 0
-        lp_locked = data.get('lpLockedPct', 0) or 0
-        price = data.get('price', 0) or 0
-        v24h = data.get('v24hUSD', 0) or 0
-        
-        # Risk flags - basic version
-        risk_flags = []
-        if liquidity < 10000:
-            risk_flags.append("⚠️ Low LP < $10k")
-        if lp_locked < 50:
-            risk_flags.append(f"⚠️ LP only {lp_locked:.1f}% locked")
-        if holder < 50:
-            risk_flags.append("⚠️ Holders < 50")
-            
-        risk_text = "\n".join(risk_flags) if risk_flags else "✅ No major red flags"
-        
-        # TODO: Plug your Hidden Tax simulation here
-        # hidden_tax = simulate_hidden_tax(address, birdeye_chain)
-        hidden_tax = "Run scan again for deep tax check"
-        
-        return f"""
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as r:
+                
+                if r.status == 401:
+                    return "❌ Birdeye API key invalid. Check Railway Variables."
+                if r.status == 429:
+                    return "❌ Rate limited. Wait 60s or upgrade Birdeye plan."
+                if r.status != 200:
+                    return "❌ Token not found. Check chain/address."
+                
+                response_json = await r.json()
+                data = response_json.get('data', {})
+                
+                if not data:
+                    return "❌ Token not found or no data returned."
+                
+                # Parse Birdeye response with fallback values
+                name = data.get('name', 'Unknown')
+                symbol = data.get('symbol', '?')
+                mc = data.get('mc', 0) or 0
+                liquidity = data.get('liquidity', 0) or 0
+                holder = data.get('holder', 0) or 0
+                lp_locked = data.get('lpLockedPct', 0) or 0
+                price = data.get('price', 0) or 0
+                v24h = data.get('v24hUSD', 0) or 0
+                
+                # Risk flags
+                risk_flags = []
+                if liquidity < 10000:
+                    risk_flags.append("⚠️ Low LP < $10k")
+                if lp_locked < 50:
+                    risk_flags.append(f"⚠️ LP only {lp_locked:.1f}% locked")
+                if holder < 50:
+                    risk_flags.append("⚠️ Holders < 50")
+                    
+                risk_text = "\n".join(risk_flags) if risk_flags else "✅ No major red flags"
+                hidden_tax = "Run scan again for deep tax check"
+                
+                return f"""
 🛡️ **Kertia Scan** 
 
 **{name} (${symbol})** | `{birdeye_chain}`
@@ -95,8 +98,8 @@ def scan_token_birdeye(chain, address):
 ⚡ Powered by Birdeye
 """
         
-    except requests.Timeout:
-        return "❌ Birdeye timeout. Try again."
+    except aiohttp.ClientConnectorError:
+        return "❌ Connection error. Cannot reach Birdeye."
     except Exception as e:
         return f"❌ Scan error: {str(e)[:100]}"
 
@@ -108,18 +111,15 @@ async def on_ready():
 @bot.command(name='scan')
 async def scan(ctx, chain: str = None, address: str = None):
     """Scan any token: /scan eth 0x..."""
-    
     if not chain or not address:
         await ctx.send("**Usage:** `/scan <chain> <address>`\n**Example:** `/scan eth 0x4ed4e862860bed51a99a7b96cf246c67a12d5e3d`\n**Chains:** eth, bsc, base, arb, sol")
         return
     
-    # Send loading message
     msg = await ctx.send("🔍 Scanning...")
     
-    # Run scan
-    result = scan_token_birdeye(chain, address)
+    # We now await the async function
+    result = await scan_token_birdeye(chain, address)
     
-    # Edit with result
     await msg.edit(content=result)
 
 @bot.command(name='ping')
