@@ -27,7 +27,6 @@ DEX_CHAIN = {
 
 # --- SESSION MANAGEMENT & APPLICATION STARTUP ---
 async def init_session(app: Application):
-    # Fix 1: Clear dangling webhook parameters securely within the loop thread initialization
     print("Clearing prior webhook registrations...")
     await app.bot.delete_webhook(drop_pending_updates=True)
     
@@ -52,7 +51,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # --- COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
-        "⚔️ <b>RAEL_KERTIA | TROJAN KILLER</b>\n\n"
+        "⚔️ <b>RAEL_KERTIA | TROJAN KILLER v1.3.1</b>\n\n"
         "Deep contract scans + Snipe protection for Base, ETH, BSC.\n\n"
         "<b>Commands:</b>\n"
         "/scan &lt;chain&gt; &lt;address&gt; - Full token audit\n"
@@ -73,7 +72,7 @@ async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 2:
+    if len(context.args)!= 2:
         await update.message.reply_html(
             "<b>Usage:</b> <code>/scan &lt;chain&gt; &lt;address&gt;</code>\n"
             "<b>Example:</b> <code>/scan eth 0x...</code>"
@@ -98,26 +97,32 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         be_url = f"https://public-api.birdeye.so/defi/token_overview?address={address}&chain={be_chain}"
         dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
 
-        headers = {"X-API-KEY": BIRDEYE_KEY} if BIRDEYE_KEY else {}
+        headers = {"X-API-KEY": BIRDEYE_KEY, "x-chain": be_chain} if BIRDEYE_KEY else {}
 
         gp_task = session.get(gp_url)
         be_task = session.get(be_url, headers=headers)
         dex_task = session.get(dex_url)
         gp_res, be_res, dex_res = await asyncio.gather(gp_task, be_task, dex_task, return_exceptions=True)
 
-        # Handle structural query responses safely
+        # --- DEBUG LOGGING ---
+        print(f"SCAN: {chain}/{address}")
+        print(f"GoPlus status: {gp_res.status if not isinstance(gp_res, Exception) else gp_res}")
+        print(f"Birdeye status: {be_res.status if not isinstance(be_res, Exception) else be_res}")
+        print(f"DexScreener status: {dex_res.status if not isinstance(dex_res, Exception) else dex_res}")
+
         gp_data = {}
         if not isinstance(gp_res, Exception) and gp_res.status == 200:
             gp_json = await gp_res.json()
-            # Fix 2: Normalize GoPlus dictionary keys to lowercase to bypass checksum mismatch issues
             raw_results = gp_json.get('result', {}) or {}
             normalized_results = {str(k).lower(): v for k, v in raw_results.items()}
             gp_data = normalized_results.get(address, {})
+            print(f"GoPlus data found: {bool(gp_data)}")
 
         be_data = {}
         if not isinstance(be_res, Exception) and be_res.status == 200:
             be_json = await be_res.json()
             be_data = be_json.get('data', {}) or {}
+            print(f"Birdeye price: {be_data.get('price')}")
 
         dex_data = {}
         if not isinstance(dex_res, Exception) and dex_res.status == 200:
@@ -125,15 +130,18 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pairs = dex_json.get('pairs', [])
             if pairs:
                 dex_data = next((p for p in pairs if str(p.get('chainId')).lower() == dex_chain), pairs[0])
+            print(f"DexScreener price: {dex_data.get('priceUsd')}")
 
         if not gp_data and not be_data and not dex_data:
-            await msg.edit_text("❌ Token not found across tracking endpoints. Verify chain alignment.")
+            await msg.edit_text("❌ Token not found across all endpoints. Check address + chain.")
             return
 
         # --- Parse Security Data ---
         def parse_tax(val):
-            v = float(val or 0)
-            return v * 100 if 0 < v < 1.0 else v
+            try:
+                v = float(val or 0)
+                return v * 100 if 0 < v < 1.0 else v
+            except: return 0.0
 
         is_hp = gp_data.get('is_honeypot', '0') == '1'
         buy_tax = parse_tax(gp_data.get('buy_tax', '0'))
@@ -141,37 +149,49 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = gp_data.get('owner_address', 'None')
         can_mint = gp_data.get('is_mintable', '0') == '1'
         can_pause = gp_data.get('trading_pausable', '0') == '1'
-        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000000000000000dead', '0x0000000000000000000000000000000000000000']
+        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000000000000000dead', '0x0000000000000000000000000000']
 
         hidden_tax = gp_data.get('hidden_owner', '0') == '1' or gp_data.get('cannot_buy', '0') == '1'
         anti_whale = gp_data.get('is_anti_whale', '0') == '1' or float(gp_data.get('max_tx_amount', '0') or 0) > 0
         cooldown = gp_data.get('trade_cooldown', '0') == '1' or int(gp_data.get('trade_cooldown', '0') or 0) > 0
-        
-        # Fix 3: Safer LP calculation engine
-        lp_holders = gp_data.get('lp_holders', [])
-        lp_total = float(gp_data.get('lp_total_supply', '0') or 0)
-        lp_locked_pct = 0.0
-        if lp_holders and lp_total > 0:
-            locked_amt = 0.0
-            for h in lp_holders:
-                addr = str(h.get('address', '')).lower()
-                tag = str(h.get('tag', '')).lower()
-                is_dead_wallet = any(x in addr for x in ['dead', 'null', '0000000000000000000000000000000000000000'])
-                is_lock_contract = 'lock' in tag or h.get('is_locked') == 1
-                
-                if is_dead_wallet or is_lock_contract:
-                    # Treat calculation ratio as percentage balance out of box safely
-                    locked_amt += float(h.get('percent', 0) or 0) * lp_total
-            
-            lp_locked_pct = (locked_amt / lp_total) * 100 if lp_total else 0.0
-            # Guard upper bounds if API combines data representations
-            if lp_locked_pct > 100.0 or gp_data.get('lp_total_supply') is None:
-                lp_locked_pct = sum(float(h.get('percent', 0) or 0) for h in lp_holders if any(x in str(h.get('address','')).lower() for x in ['dead', 'null', '0000']) or 'lock' in str(h.get('tag','')).lower()) * 100
 
-        # --- Parse Market Data ---
-        price = float(be_data.get('price') or dex_data.get('priceUsd') or 0)
-        mcap = float(be_data.get('mc') or dex_data.get('fdv') or 0)
-        liquidity = float(be_data.get('liquidity') or dex_data.get('liquidity', {}).get('usd') or 0)
+        # Safer LP calculation using percent field
+        lp_holders = gp_data.get('lp_holders', [])
+        lp_locked_pct = 0.0
+        if lp_holders:
+            try:
+                lp_locked_pct = sum(
+                    float(h.get('percent', 0) or 0)
+                    for h in lp_holders
+                    if any(x in str(h.get('address','')).lower() for x in ['dead', 'null', '0000'])
+                    or 'lock' in str(h.get('tag','')).lower()
+                    or h.get('is_locked') == 1
+                ) * 100
+            except: lp_locked_pct = 0.0
+
+        # --- Parse Market Data - Fallback chain: Birdeye -> DexScreener ---
+        price = 0.0
+        mcap = 0.0
+        liquidity = 0.0
+
+        try: price = float(be_data.get('price') or 0)
+        except: pass
+        if price == 0:
+            try: price = float(dex_data.get('priceUsd') or 0)
+            except: pass
+
+        try: mcap = float(be_data.get('mc') or 0)
+        except: pass
+        if mcap == 0:
+            try: mcap = float(dex_data.get('fdv') or 0)
+            except: pass
+
+        try: liquidity = float(be_data.get('liquidity') or 0)
+        except: pass
+        if liquidity == 0:
+            try: liquidity = float(dex_data.get('liquidity', {}).get('usd') or 0)
+            except: pass
+
         symbol = escape(gp_data.get('token_symbol') or be_data.get('symbol') or dex_data.get('baseToken', {}).get('symbol', 'UNKNOWN'))
 
         price_change = dex_data.get('priceChange', {})
@@ -180,7 +200,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         holders = int(gp_data.get('holder_count') or dex_data.get('info', {}).get('holders') or 0)
         pair_addr = dex_data.get('pairAddress', '')
 
-        # --- Scoring Engine ---
+        # --- Scoring ---
         score = 100
         threats = 0
         if is_hp: score -= 50; threats += 1
@@ -221,7 +241,8 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💰 <b>Live Alpha:</b>
 - <b>Price:</b> ${price:.8f}
 - <b>1h:</b> {'📉' if h1 < 0 else '📈'} {h1:.1f}% | <b>24h:</b> {h24:.1f}%
-- <b>Liquidity:</b> ${liquidity:,.0f} | <b>Holders:</b> {holders}
+- <b>MC:</b> ${mcap:,.0f} | <b>Liquidity:</b> ${liquidity:,.0f}
+- <b>Holders:</b> {holders}
 """
 
         if hidden_tax:
@@ -243,10 +264,11 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(result, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb), disable_web_page_preview=True)
 
     except Exception as e:
+        print(f"SCAN CRASH: {e}")
         await msg.edit_text(f"❌ Scan execution failed: {escape(str(e)[:120])}")
 
 async def snipecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 2:
+    if len(context.args)!= 2:
         await update.message.reply_html(
             "<b>Usage:</b> <code>/snipecheck &lt;chain&gt; &lt;address&gt;</code>\n"
             "<b>Example:</b> <code>/snipecheck base 0x...</code>"
@@ -268,7 +290,7 @@ async def snipecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with session.get(gp_url) as res:
             data = await res.json()
 
-        if data.get('code') != 1 or not data.get('result'):
+        if data.get('code')!= 1 or not data.get('result'):
             await msg.edit_text("❌ Token metadata verification empty. Check configuration details.")
             return
 
@@ -282,7 +304,7 @@ async def snipecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         is_hp = gp_data.get('is_honeypot', '0') == '1'
         owner = gp_data.get('owner_address', 'None')
-        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000000000000000000000000000dead']
+        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000dead']
         hidden_tax = gp_data.get('hidden_owner', '0') == '1' or gp_data.get('cannot_buy', '0') == '1'
 
         if is_hp: verdict = "🔴 FATAL: Honeypot Detected"
