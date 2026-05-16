@@ -4,7 +4,7 @@ import sys
 import os
 from telegram import Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.helpers import escape【5453293173733125521†L3-L6】
+from telegram.helpers import escape
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -104,7 +104,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dex_task = session.get(dex_url)
         gp_res, be_res, dex_res = await asyncio.gather(gp_task, be_task, dex_task, return_exceptions=True)
 
-        # --- DEBUG LOGGING ---
         print(f"SCAN: {chain}/{address}")
         print(f"GoPlus: {gp_res.status if not isinstance(gp_res, Exception) else 'ERR'} | Birdeye: {be_res.status if not isinstance(be_res, Exception) else 'ERR'} | Dex: {dex_res.status if not isinstance(dex_res, Exception) else 'ERR'}")
 
@@ -131,7 +130,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"❌ <b>Token not found</b>\n\nAddress <code>{address}</code> not indexed on {chain.upper()}.\n\nTry:\n1. Check chain is correct\n2. Token might be too new\n3. Use contract address, not pair")
             return
 
-        # --- Parse Security Data ---
         def parse_tax(val):
             try:
                 v = float(val or 0)
@@ -144,13 +142,12 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = gp_data.get('owner_address', 'None')
         can_mint = gp_data.get('is_mintable', '0') == '1'
         can_pause = gp_data.get('trading_pausable', '0') == '1'
-        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000000000000000dead', '0x0000000000000000000000000000']
+        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000000000000000dead', '0x0000000000000000']
 
         hidden_tax = gp_data.get('hidden_owner', '0') == '1' or gp_data.get('cannot_buy', '0') == '1'
         anti_whale = gp_data.get('is_anti_whale', '0') == '1' or float(gp_data.get('max_tx_amount', '0') or 0) > 0
         cooldown = gp_data.get('trade_cooldown', '0') == '1' or int(gp_data.get('trade_cooldown', '0') or 0) > 0
 
-        # Safer LP calculation using percent field
         lp_holders = gp_data.get('lp_holders', [])
         lp_locked_pct = 0.0
         if lp_holders:
@@ -164,7 +161,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ) * 100
             except: lp_locked_pct = 0.0
 
-        # --- Parse Market Data - Fallback chain: Birdeye -> DexScreener ---
         price = 0.0
         mcap = 0.0
         liquidity = 0.0
@@ -195,7 +191,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         holders = int(gp_data.get('holder_count') or dex_data.get('info', {}).get('holders') or 0)
         pair_addr = dex_data.get('pairAddress', '')
 
-        # --- Scoring ---
         score = 100
         threats = 0
         if is_hp: score -= 50; threats += 1
