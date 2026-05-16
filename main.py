@@ -1,24 +1,15 @@
-import discord
-from discord.ext import commands
-import aiohttp
 import os
+import aiohttp
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ENV VARS - Make sure these exist in Railway
-DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 BIRDEYE_KEY = os.getenv('BIRDEYE_API_KEY')
 
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='/', intents=intents)
-
 async def scan_token_birdeye(chain: str, address: str) -> str:
-    """
-    Main scanner using Birdeye API (Asynchronous)
-    """
     chain_map = {
         'eth': 'ethereum', 'ethereum': 'ethereum',
         'bsc': 'bsc', 'bnb': 'bsc',
@@ -38,26 +29,21 @@ async def scan_token_birdeye(chain: str, address: str) -> str:
         "x-chain": birdeye_chain
     }
     
-    # Use aiohttp ClientSession with a 5-second total timeout
     timeout = aiohttp.ClientTimeout(total=5)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers) as r:
-                
                 if r.status == 401:
                     return "❌ Birdeye API key invalid. Check Railway Variables."
                 if r.status == 429:
-                    return "❌ Rate limited. Wait 60s or upgrade Birdeye plan."
+                    return "❌ Rate limited. Wait 60s."
                 if r.status != 200:
                     return "❌ Token not found. Check chain/address."
                 
-                response_json = await r.json()
-                data = response_json.get('data', {})
-                
+                data = (await r.json()).get('data', {})
                 if not data:
                     return "❌ Token not found or no data returned."
                 
-                # Parse Birdeye response with fallback values
                 name = data.get('name', 'Unknown')
                 symbol = data.get('symbol', '?')
                 mc = data.get('mc', 0) or 0
@@ -67,7 +53,6 @@ async def scan_token_birdeye(chain: str, address: str) -> str:
                 price = data.get('price', 0) or 0
                 v24h = data.get('v24hUSD', 0) or 0
                 
-                # Risk flags
                 risk_flags = []
                 if liquidity < 10000:
                     risk_flags.append("⚠️ Low LP < $10k")
@@ -77,7 +62,6 @@ async def scan_token_birdeye(chain: str, address: str) -> str:
                     risk_flags.append("⚠️ Holders < 50")
                     
                 risk_text = "\n".join(risk_flags) if risk_flags else "✅ No major red flags"
-                hidden_tax = "Run scan again for deep tax check"
                 
                 return f"""
 🛡️ **Kertia Scan** 
@@ -92,46 +76,47 @@ async def scan_token_birdeye(chain: str, address: str) -> str:
 **Risk Check:**
 {risk_text}
 
-**Hidden Tax:**
-🔍 {hidden_tax}
-
 ⚡ Powered by Birdeye
 """
-        
-    except aiohttp.ClientConnectorError:
-        return "❌ Connection error. Cannot reach Birdeye."
     except Exception as e:
         return f"❌ Scan error: {str(e)[:100]}"
 
-@bot.event
-async def on_ready():
-    print(f'Kertia online as {bot.user}')
-    print(f'Birdeye key loaded: {bool(BIRDEYE_KEY)}')
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚔️ **RAEL_KERTIA v0.7.2 | Trojan Killer**\n\n"
+        "Commands:\n/scan <chain> <0x...> - God Mode audit\n\n"
+        "Chains: eth, base, bsc, arb, sol"
+    )
 
-@bot.command(name='scan')
-async def scan(ctx, chain: str = None, address: str = None):
-    """Scan any token: /scan eth 0x..."""
-    if not chain or not address:
-        await ctx.send("**Usage:** `/scan <chain> <address>`\n**Example:** `/scan eth 0x4ed4e862860bed51a99a7b96cf246c67a12d5e3d`\n**Chains:** eth, bsc, base, arb, sol")
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "**Usage:** `/scan <chain> <address>`\n"
+            "**Example:** `/scan eth 0x4ed4e862860bed51a99a7b96cf246c67a12d5e3d`",
+            parse_mode='Markdown'
+        )
         return
     
-    msg = await ctx.send("🔍 Scanning...")
-    
-    # We now await the async function
+    chain, address = context.args
+    msg = await update.message.reply_text("🔍 Scanning...")
     result = await scan_token_birdeye(chain, address)
+    await msg.edit_text(result, parse_mode='Markdown')
+
+def main():
+    print("Kertia starting...")
+    if not TELEGRAM_TOKEN:
+        print("ERROR: TELEGRAM_TOKEN not set")
+        return
+    if not BIRDEYE_KEY:
+        print("ERROR: BIRDEYE_API_KEY not set")
+        return
+        
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("scan", scan))
     
-    await msg.edit(content=result)
+    print("Bot ready - polling Telegram")
+    app.run_polling()
 
-@bot.command(name='ping')
-async def ping(ctx):
-    """Test if bot is alive"""
-    await ctx.send("Kertia online ⚡")
-
-# Run bot
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
-        print("ERROR: DISCORD_TOKEN not set in env")
-    elif not BIRDEYE_KEY:
-        print("ERROR: BIRDEYE_API_KEY not set in env")
-    else:
-        bot.run(DISCORD_TOKEN)
+    main()
