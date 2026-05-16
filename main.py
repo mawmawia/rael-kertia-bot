@@ -4,7 +4,7 @@ import sys
 import os
 from telegram import Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.helpers import escape
+from telegram.helpers import escape【5453293173733125521†L3-L6】
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -29,7 +29,7 @@ DEX_CHAIN = {
 async def init_session(app: Application):
     print("Clearing prior webhook registrations...")
     await app.bot.delete_webhook(drop_pending_updates=True)
-    
+
     timeout = aiohttp.ClientTimeout(total=15)
     app.bot_data['session'] = aiohttp.ClientSession(timeout=timeout)
     print("Kertia starting... Engine online.")
@@ -51,13 +51,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # --- COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
-        "⚔️ <b>RAEL_KERTIA | TROJAN KILLER v1.3.1</b>\n\n"
+        "⚔️ <b>RAEL_KERTIA | TROJAN KILLER v1.3.2</b>\n\n"
         "Deep contract scans + Snipe protection for Base, ETH, BSC.\n\n"
         "<b>Commands:</b>\n"
         "/scan &lt;chain&gt; &lt;address&gt; - Full token audit\n"
         "/snipecheck &lt;chain&gt; &lt;address&gt; - Pre-launch safety check\n"
         "/trade - Open Rael Terminal\n\n"
-        "<b>Example:</b> <code>/scan base 0x4ed4e862860bed51a99a7b96cf246c67a12d5e3d</code>\n\n"
+        "<b>Example:</b> <code>/scan base 0x532f27101965dd16442E59d40670FaF5eBB142E4</code>\n\n"
         "⚡ Zero fees. Max alpha."
     )
 
@@ -106,9 +106,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # --- DEBUG LOGGING ---
         print(f"SCAN: {chain}/{address}")
-        print(f"GoPlus status: {gp_res.status if not isinstance(gp_res, Exception) else gp_res}")
-        print(f"Birdeye status: {be_res.status if not isinstance(be_res, Exception) else be_res}")
-        print(f"DexScreener status: {dex_res.status if not isinstance(dex_res, Exception) else dex_res}")
+        print(f"GoPlus: {gp_res.status if not isinstance(gp_res, Exception) else 'ERR'} | Birdeye: {be_res.status if not isinstance(be_res, Exception) else 'ERR'} | Dex: {dex_res.status if not isinstance(dex_res, Exception) else 'ERR'}")
 
         gp_data = {}
         if not isinstance(gp_res, Exception) and gp_res.status == 200:
@@ -116,13 +114,11 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw_results = gp_json.get('result', {}) or {}
             normalized_results = {str(k).lower(): v for k, v in raw_results.items()}
             gp_data = normalized_results.get(address, {})
-            print(f"GoPlus data found: {bool(gp_data)}")
 
         be_data = {}
         if not isinstance(be_res, Exception) and be_res.status == 200:
             be_json = await be_res.json()
             be_data = be_json.get('data', {}) or {}
-            print(f"Birdeye price: {be_data.get('price')}")
 
         dex_data = {}
         if not isinstance(dex_res, Exception) and dex_res.status == 200:
@@ -130,10 +126,9 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pairs = dex_json.get('pairs', [])
             if pairs:
                 dex_data = next((p for p in pairs if str(p.get('chainId')).lower() == dex_chain), pairs[0])
-            print(f"DexScreener price: {dex_data.get('priceUsd')}")
 
         if not gp_data and not be_data and not dex_data:
-            await msg.edit_text("❌ Token not found across all endpoints. Check address + chain.")
+            await msg.edit_text(f"❌ <b>Token not found</b>\n\nAddress <code>{address}</code> not indexed on {chain.upper()}.\n\nTry:\n1. Check chain is correct\n2. Token might be too new\n3. Use contract address, not pair")
             return
 
         # --- Parse Security Data ---
@@ -297,7 +292,7 @@ async def snipecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_results = data.get('result', {}) or {}
         normalized_results = {str(k).lower(): v for k, v in raw_results.items()}
         gp_data = normalized_results.get(address, {})
-        
+
         if not gp_data:
             await msg.edit_text("❌ Token parsing data failed. Address could be unindexed.")
             return
