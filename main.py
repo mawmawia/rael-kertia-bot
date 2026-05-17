@@ -5,6 +5,8 @@ import aiohttp
 import requests
 import re
 import json
+import secrets
+import string
 from datetime import date
 from web3 import Web3
 from telegram import Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,10 +23,12 @@ DEV_COLD_WALLET = os.getenv("DEV_COLD_WALLET")
 BASE_RPC = os.getenv("BASE_RPC")
 BIRDEYE_KEY = os.getenv("BIRDEYE_KEY")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Rael_kertia_bot") # Set this in Railway
 
 # --- CORE ENGINE SETTINGS ---
 DRY_RUN = False
 FEE_PERCENT = 0.005
+REFERRAL_CUT = 0.10 # 10% of your 0.5% fee goes to referrer = 0.05% of trade
 CHAIN_ID = 8453
 MIN_GAS_ETH = 0.0001
 DAILY_FREE_LIMIT = 10
@@ -49,7 +53,7 @@ UNISWAP_V2_ROUTER_ABI = [
     }
 ]
 
-WETH_ADDRESS_CORRECT = "0x4200000000000000000006"
+WETH_ADDRESS_CORRECT = "0x4200000000000000000000000006"
 
 USER_USAGE_TRACKER = {}
 USER_DB_FILE = "users.json"
@@ -58,7 +62,7 @@ w3 = Web3(Web3.HTTPProvider(BASE_RPC))
 DEV_WALLET_CHECKSUM = Web3.to_checksum_address(DEV_COLD_WALLET)
 fernet = Fernet(ENCRYPTION_KEY.encode())
 
-# --- USER WALLET MANAGEMENT ---
+# --- USER & REFERRAL MANAGEMENT ---
 def load_users():
     try:
         with open(USER_DB_FILE, 'r') as f:
@@ -70,6 +74,9 @@ def save_users(data):
     with open(USER_DB_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
+def generate_ref_code():
+    return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+
 def get_user_wallet(user_id: int):
     users = load_users()
     user_str = str(user_id)
@@ -79,6 +86,17 @@ def get_user_wallet(user_id: int):
     pk = fernet.decrypt(enc_pk).decode()
     address = users[user_str]['address']
     return pk, address
+
+def get_user_data(user_id: int):
+    users = load_users()
+    return users.get(str(user_id), {})
+
+def find_user_by_ref_code(ref_code: str):
+    users = load_users()
+    for uid, data in users.items():
+        if data.get('ref_code') == ref_code:
+            return int(uid), data
+    return None, None
 
 # --- UTILITIES ---
 def sanitize_address(raw_arg: str) -> str:
@@ -91,15 +109,6 @@ def safe_float(val, default=0.0) -> float:
         return float(val) if val is not None else default
     except (ValueError, TypeError):
         return default
-
-def get_eth_price():
-    if not BIRDEYE_KEY: return 3200.00
-    try:
-        url = f"https://public-api.birdeye.so/defi/price?address={WETH_ADDRESS_CORRECT}"
-        headers = {"X-API-KEY": BIRDEYE_KEY}
-        r = requests.get(url, headers=headers, timeout=5)
-        return float(r.json()["data"]["value"])
-    except: return 3200.00
 
 def get_eth_balance(address):
     wei = w3.eth.get_balance(Web3.to_checksum_address(address))
@@ -125,7 +134,7 @@ async def init_session(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
     timeout = aiohttp.ClientTimeout(total=15)
     app.bot_data['session'] = aiohttp.ClientSession(timeout=timeout)
-    print("Rael_Kertia Engine v3.1 Online.")
+    print("Rael_Kertia Engine v3.2 Online.")
 
 async def close_session(app: Application):
     session = app.bot_data.get('session')
@@ -140,12 +149,31 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- ENGINE COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    users = load_users()
+    user_str = str(user_id)
+
+    # Handle referral
+    if context.args and context.args[0].startswith('ref_'):
+        ref_code = context.args[0][4:].upper()
+        if user_str not in users: # Only for new users
+            referrer_id, referrer_data = find_user_by_ref_code(ref_code)
+            if referrer_id and referrer_id!= user_id:
+                users.setdefault(user_str, {})
+                users[user_str]['referred_by'] = referrer_id
+                # Update referrer stats
+                referrer_data['referrals'] = referrer_data.get('referrals', 0) + 1
+                users[str(referrer_id)] = referrer_data
+                save_users(users)
+                await update.message.reply_html(f"⚔️ Referred by user <code>{referrer_id}</code>. Welcome to Rael_Kertia.")
+
     await update.message.reply_html(
-        "⚔️ <b>RAEL_KERTIA BOT v3.1 | PUBLIC READY</b>\n\n"
-        "<b>0.5% Fees | Per-User Wallets</b>\n\n"
+        "⚔️ <b>RAEL_KERTIA BOT v3.2 | PUBLIC READY</b>\n\n"
+        "<b>0.5% Fees | Per-User Wallets | 10% Referral Kickback</b>\n\n"
         "<b>Commands:</b>\n"
         "/setup - Create your personal trading wallet\n"
         "/wallet - View your wallet address & balance\n"
+        "/referral - Get your invite link & stats\n"
         "/scan [chain] [address] - Security Audit\n"
         "/snipe [chain] [address] [amount_eth] - Execute Trade\n"
         "/trade - Launch GUI Terminal"
@@ -162,15 +190,24 @@ async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     enc_pk = fernet.encrypt(account.key.hex().encode()).decode()
 
     users = load_users()
-    users[str(user_id)] = {'address': account.address, 'pk': enc_pk}
+    user_data = users.get(str(user_id), {})
+    user_data.update({
+        'address': account.address,
+        'pk': enc_pk,
+        'ref_code': user_data.get('ref_code') or generate_ref_code(),
+        'referrals': user_data.get('referrals', 0),
+        'earned_eth': user_data.get('earned_eth', 0.0)
+    })
+    users[str(user_id)] = user_data
     save_users(users)
 
     await update.message.reply_html(
         "⚔️ <b>Wallet Created Successfully</b>\n\n"
-        f"Address: <code>{account.address}</code>\n\n"
+        f"Address: <code>{account.address}</code>\n"
+        f"Referral Code: <code>{user_data['ref_code']}</code>\n\n"
         "1. Deposit Base ETH to this address to trade\n"
         "2. Your key is encrypted. We cannot see it\n"
-        "3. Use /wallet to check balance\n\n"
+        "3. Use /referral to invite friends\n\n"
         "<b>⚠️ FUND THIS WALLET BEFORE SNIPING</b>"
     )
 
@@ -186,6 +223,30 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Address: <code>{address}</code>\n"
         f"Balance: <code>{bal:.5f} ETH</code>\n\n"
         "Deposit Base ETH to this address to start trading."
+    )
+
+async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_user_data(user_id)
+
+    if not user_data.get('ref_code'):
+        await update.message.reply_html("❌ Run /setup first to generate your referral code.")
+        return
+
+    ref_code = user_data['ref_code']
+    referrals = user_data.get('referrals', 0)
+    earned = user_data.get('earned_eth', 0.0)
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_code}"
+
+    await update.message.reply_html(
+        f"⚔️ <b>Rael Referral Program</b>\n\n"
+        f"Your Code: <code>{ref_code}</code>\n"
+        f"Your Link: <code>{ref_link}</code>\n\n"
+        f"📊 <b>Stats:</b>\n"
+        f"- Invited: <code>{referrals}</code> users\n"
+        f"- Earned: <code>{earned:.6f} ETH</code>\n\n"
+        f"💰 <b>You earn 10% of our 0.5% fee</b> on every trade your referrals make. Lifetime kickback.\n\n"
+        f"Share your link to start earning."
     )
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,7 +328,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         verdict = "SAFE" if score >= 80 else "RISKY" if score >= 50 else "DANGER"
 
-        # Build output matching screenshot 4
         output = f"""⚔️ <b>RAEL_KERTIA AUDIT: ${symbol}</b>
 <code>{address[:6]}...{address[-4:]}</code> | {chain.upper()}
 
@@ -290,7 +350,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - <b>Holders:</b> {int(holders)}
 """
 
-        # Add warnings if needed
         if is_anti_whale:
             output += f"\n⚠️ <b>Soft Honeypot:</b> Anti-whale limits selling."
         if lp_locked_pct < 50:
@@ -298,7 +357,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         output += f"\n\n🛡️ <i>Scanned by Rael_Kertia | Threats Neutralized: {threats}</i>"
 
-        # Buttons
         kb = [
             [InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{DEX_CHAIN.get(chain, 'base')}/{address}")],
             [InlineKeyboardButton("🛡️ GoPlus Report", url=f"https://gopluslabs.io/token-security/{chain_id}/{address}")]
@@ -309,7 +367,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"Scan failed: {escape(str(e)[:100])}")
 
-# --- LOW-LATENCY SNIPE ENGINE WITH PER-USER WALLETS ---
+# --- SNIPE ENGINE WITH REFERRAL PAYOUTS ---
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_pk, user_address = get_user_wallet(user_id)
@@ -344,11 +402,25 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("🎯 Broadcasting bundle...")
 
-    fee_amount = amount_eth * FEE_PERCENT
-    trade_allocation = amount_eth - fee_amount
+    total_fee = amount_eth * FEE_PERCENT
+    users = load_users()
+    user_data = users.get(str(user_id), {})
+
+    # Calculate referral payout
+    ref_payout = 0.0
+    ref_address = None
+    if user_data.get('referred_by'):
+        ref_id = str(user_data['referred_by'])
+        ref_data = users.get(ref_id, {})
+        if ref_data.get('address'):
+            ref_payout = total_fee * REFERRAL_CUT
+            ref_address = ref_data['address']
+
+    dev_fee = total_fee - ref_payout
+    trade_allocation = amount_eth - total_fee
 
     if DRY_RUN:
-        await msg.edit_text(f"🚀 [DRY_RUN] Ready: {trade_allocation:.4f} ETH")
+        await msg.edit_text(f"🚀 [DRY_RUN] Ready: {trade_allocation:.4f} ETH | Fee: {total_fee:.6f} | Ref: {ref_payout:.6f}")
         return
 
     try:
@@ -365,26 +437,42 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_priority_fee = w3.eth.max_priority_fee
         max_fee = int((base_fee * 1.5) + max_priority_fee)
 
-        # Pending nonce for user wallet
-        try:
-            start_nonce = w3.eth.get_transaction_count(user_address, 'pending')
-        except Exception as e:
-            await msg.edit_text("❌ Chain sync error. Retry.")
-            return
+        start_nonce = w3.eth.get_transaction_count(user_address, 'pending')
+        txs_to_send = []
 
-        # 1. Fee TX to dev wallet
+        # 1. Dev fee TX
         fee_tx = {
             'nonce': start_nonce,
             'to': DEV_WALLET_CHECKSUM,
-            'value': w3.to_wei(fee_amount, 'ether'),
+            'value': w3.to_wei(dev_fee, 'ether'),
             'gas': 21000,
             'maxFeePerGas': max_fee,
             'maxPriorityFeePerGas': max_priority_fee,
             'chainId': CHAIN_ID
         }
-        signed_fee = w3.eth.account.sign_transaction(fee_tx, user_pk)
+        txs_to_send.append(w3.eth.account.sign_transaction(fee_tx, user_pk))
+        current_nonce = start_nonce + 1
 
-        # 2. Swap TX
+        # 2. Referral payout TX if applicable
+        if ref_payout > 0 and ref_address:
+            ref_tx = {
+                'nonce': current_nonce,
+                'to': Web3.to_checksum_address(ref_address),
+                'value': w3.to_wei(ref_payout, 'ether'),
+                'gas': 21000,
+                'maxFeePerGas': max_fee,
+                'maxPriorityFeePerGas': max_priority_fee,
+                'chainId': CHAIN_ID
+            }
+            txs_to_send.append(w3.eth.account.sign_transaction(ref_tx, user_pk))
+            current_nonce += 1
+            # Update referrer earnings
+            ref_data = users[str(user_data['referred_by'])]
+            ref_data['earned_eth'] = ref_data.get('earned_eth', 0.0) + ref_payout
+            users[str(user_data['referred_by'])] = ref_data
+            save_users(users)
+
+        # 3. Swap TX
         router = w3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_ROUTER_ADDRESS), abi=UNISWAP_V2_ROUTER_ABI)
         path = [weth_address, target_address]
         deadline = latest_block['timestamp'] + 300
@@ -394,7 +482,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'value': w3.to_wei(trade_allocation, 'ether'),
             'maxFeePerGas': max_fee,
             'maxPriorityFeePerGas': max_priority_fee,
-            'nonce': start_nonce + 1,
+            'nonce': current_nonce,
             'chainId': CHAIN_ID
         }
 
@@ -409,18 +497,21 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         swap_tx = router.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(
             0, path, user_address, deadline
         ).build_transaction(swap_tx_params)
+        txs_to_send.append(w3.eth.account.sign_transaction(swap_tx, user_pk))
 
-        signed_swap = w3.eth.account.sign_transaction(swap_tx, user_pk)
+        # Fire all txs
+        hashes = []
+        for signed_tx in txs_to_send:
+            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            hashes.append(tx_hash.hex())
 
-        # 3. Fire both
-        fee_hash = w3.eth.send_raw_transaction(signed_fee.raw_transaction)
-        swap_hash = w3.eth.send_raw_transaction(signed_swap.raw_transaction)
-
+        ref_msg = f"\n• Referral: <code>{ref_payout:.6f} ETH</code>" if ref_payout > 0 else ""
         await msg.edit_text(
             f"⚔️ <b>BUNDLE SENT</b>\n\n"
             f"• Wallet: <code>{user_address[:6]}...{user_address[-4:]}</code>\n"
             f"• Amount: <code>{trade_allocation:.5f} ETH</code>\n"
-            f"• TX: <code>{swap_hash.hex()}</code>",
+            f"• Fee: <code>{dev_fee:.6f} ETH</code>{ref_msg}\n"
+            f"• TX: <code>{hashes[-1]}</code>",
             parse_mode='HTML'
         )
 
@@ -442,6 +533,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setup", setup))
     application.add_handler(CommandHandler("wallet", wallet))
+    application.add_handler(CommandHandler("referral", referral))
     application.add_handler(CommandHandler("trade", trade))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("snipe", snipe))
