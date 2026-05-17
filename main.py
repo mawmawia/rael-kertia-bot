@@ -125,7 +125,7 @@ async def init_session(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
     timeout = aiohttp.ClientTimeout(total=15)
     app.bot_data['session'] = aiohttp.ClientSession(timeout=timeout)
-    print("Rael_Kertia Engine v3.0 Online.")
+    print("Rael_Kertia Engine v3.1 Online.")
 
 async def close_session(app: Application):
     session = app.bot_data.get('session')
@@ -141,7 +141,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # --- ENGINE COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
-        "⚔️ <b>RAEL_KERTIA BOT v3.0 | PUBLIC READY</b>\n\n"
+        "⚔️ <b>RAEL_KERTIA BOT v3.1 | PUBLIC READY</b>\n\n"
         "<b>0.5% Fees | Per-User Wallets</b>\n\n"
         "<b>Commands:</b>\n"
         "/setup - Create your personal trading wallet\n"
@@ -233,43 +233,79 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             js = await be_res.json()
             be_data = js.get('data', {}) or {}
 
+        # GoPlus fields
         is_hp = gp_data.get('is_honeypot', '0') == '1'
         buy_tax = safe_float(gp_data.get('buy_tax', 0)) * 100
         sell_tax = safe_float(gp_data.get('sell_tax', 0)) * 100
         can_take_back = gp_data.get('can_take_back_ownership', '0') == '1'
         hidden_owner = gp_data.get('hidden_owner', '0') == '1'
+        is_mintable = gp_data.get('is_mintable', '0') == '1'
+        is_anti_whale = gp_data.get('is_anti_whale', '0') == '1'
+        has_trading_cooldown = gp_data.get('trading_cooldown', '0') == '1'
+        personal_slippage_modifiable = gp_data.get('personal_slippage_modifiable', '0') == '1'
         lp_holders = gp_data.get('lp_holders', []) or []
         lp_locked_pct = sum([safe_float(h.get('percent', 0)) for h in lp_holders if h.get('is_locked') == 1]) * 100
 
+        # BirdEye fields
         price = safe_float(be_data.get('price'))
         mcap = safe_float(be_data.get('mc'))
         liquidity = safe_float(be_data.get('liquidity'))
         symbol = escape(gp_data.get('token_symbol') or be_data.get('symbol', 'UNKNOWN'))
+        change_1h = safe_float(be_data.get('priceChange1hPercent'))
+        change_24h = safe_float(be_data.get('priceChange24hPercent'))
+        holders = safe_float(be_data.get('holder'))
 
+        # Scoring
         score = 100
-        if is_hp: score -= 50
-        if buy_tax > 5 or sell_tax > 5: score -= 20
-        if hidden_owner or can_take_back: score -= 20
+        threats = 0
+        if is_hp: score -= 50; threats += 1
+        if buy_tax > 5 or sell_tax > 5: score -= 20; threats += 1
+        if hidden_owner or can_take_back: score -= 20; threats += 1
         if lp_locked_pct < 50: score -= 10
+        if is_mintable: score -= 10; threats += 1
+        if personal_slippage_modifiable: score -= 10; threats += 1
 
         verdict = "SAFE" if score >= 80 else "RISKY" if score >= 50 else "DANGER"
 
-        output = f"""⚔️ <b>RAEL AUDIT: ${symbol}</b>
+        # Build output matching screenshot 4
+        output = f"""⚔️ <b>RAEL_KERTIA AUDIT: ${symbol}</b>
 <code>{address[:6]}...{address[-4:]}</code> | {chain.upper()}
 
 🛡️ <b>Score: {score}/100 | {verdict}</b>
 ——————————————————
 - <b>Honeypot:</b> {'🚨 Yes' if is_hp else '✅ No'}
-- <b>Taxes:</b> Buy/Sell {buy_tax:.1f}%/{sell_tax:.1f}%
-- <b>LP Locked:</b> {lp_locked_pct:.1f}%
-- <b>Ownership:</b> {'⚠️ Mutable' if can_take_back else '✅ Safe'}
+- <b>Taxes:</b> Buy/Sell {buy_tax:.1f}%/{sell_tax:.1f}% {'✅' if buy_tax < 5 and sell_tax < 5 else '⚠️'}
+- <b>LP Locked:</b> {lp_locked_pct:.1f}% {'❌ UNLOCKED' if lp_locked_pct < 50 else '✅'}
+- <b>Ownership:</b> {'⚠️ 0x0000...0000' if can_take_back else '✅ Safe'}
+- <b>Hidden Tax:</b> {'⚠️ Yes' if personal_slippage_modifiable else '✅ No'}
+- <b>Anti-Whale:</b> {'⚠️ Enabled' if is_anti_whale else '✅ No'}
+- <b>Mintable:</b> {'⚠️ Yes' if is_mintable else '✅ No'}
+- <b>Cooldown:</b> {'⚠️ Yes' if has_trading_cooldown else '✅ None'}
+- <b>Whale Risk:</b> {'⚠️ High' if is_anti_whale or sell_tax > 10 else '✅ Low'}
 ——————————————————
-💰 <b>Live Data:</b>
+💰 <b>Live Alpha:</b>
 - <b>Price:</b> ${price:.8f}
+- <b>1h:</b> 📉 {change_1h:.1f}% | <b>24h:</b> {change_24h:.1f}%
 - <b>MC:</b> ${mcap:,.0f} | <b>Liquidity:</b> ${liquidity:,.0f}
+- <b>Holders:</b> {int(holders)}
 """
-        kb = [[InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{DEX_CHAIN.get(chain, 'base')}/{address}")]]
+
+        # Add warnings if needed
+        if is_anti_whale:
+            output += f"\n⚠️ <b>Soft Honeypot:</b> Anti-whale limits selling."
+        if lp_locked_pct < 50:
+            output += f"\n⚠️ <b>Rug Risk:</b> LP not locked safely."
+
+        output += f"\n\n🛡️ <i>Scanned by Rael_Kertia | Threats Neutralized: {threats}</i>"
+
+        # Buttons
+        kb = [
+            [InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{DEX_CHAIN.get(chain, 'base')}/{address}")],
+            [InlineKeyboardButton("🛡️ GoPlus Report", url=f"https://gopluslabs.io/token-security/{chain_id}/{address}")]
+        ]
+
         await msg.edit_text(output, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb), disable_web_page_preview=True)
+
     except Exception as e:
         await msg.edit_text(f"Scan failed: {escape(str(e)[:100])}")
 
