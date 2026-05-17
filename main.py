@@ -1,339 +1,156 @@
-import asyncio
-import aiohttp
-import sys
 import os
-from telegram import Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.helpers import escape
+import requests
+from web3 import Web3
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from dotenv import load_dotenv
 
-# --- CONFIG ---
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-BIRDEYE_KEY = os.getenv("BIRDEYE_API_KEY")
+load_dotenv()
 
-CHAIN_MAP = {
-    'eth': '1', 'base': '8453', 'bsc': '56',
-    'arb': '42161', 'op': '10', 'poly': '137', 'avax': '43114'
-}
+# --- ENV VARS ---
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DEV_COLD_WALLET = os.getenv("DEV_COLD_WALLET")
+BASE_RPC = os.getenv("BASE_RPC", "https://mainnet.base.org")
+PRIVATE_KEY = os.getenv("BOT_WALLET_PRIVATE_KEY")
+BIRDEYE_KEY = os.getenv("BIRDEYE_KEY") # Optional but recommended
 
-BIRDEYE_CHAIN = {
-    'eth': 'ethereum', 'base': 'base', 'bsc': 'bsc',
-    'arb': 'arbitrum', 'op': 'optimism', 'poly': 'polygon', 'avax': 'avalanche'
-}
+# --- SETTINGS ---
+DRY_RUN = False # LIVE TRADING ON
+FEE_PERCENT = 0.005 # 0.5%
+CHAIN_ID = 8453 # Base
+MIN_GAS_ETH = 0.0001 # ~₹21 - bot stops if below this
 
-DEX_CHAIN = {
-    'eth': 'ethereum', 'base': 'base', 'bsc': 'bsc',
-    'arb': 'arbitrum', 'op': 'optimism', 'poly': 'polygon'
-}
+# --- WEB3 SETUP ---
+w3 = Web3(Web3.HTTPProvider(BASE_RPC))
+DEV_WALLET_CHECKSUM = Web3.to_checksum_address(DEV_COLD_WALLET)
+bot_account = w3.eth.account.from_key(PRIVATE_KEY)
+BOT_WALLET = bot_account.address
 
-# --- SESSION MANAGEMENT & APPLICATION STARTUP ---
-async def init_session(app: Application):
-    print("Clearing prior webhook registrations...")
-    await app.bot.delete_webhook(drop_pending_updates=True)
+assert BOT_WALLET.lower() == "0x2cD33b0702A5046966C068250666ff7CF3F4ebBE".lower(), "Private key mismatch"
 
-    timeout = aiohttp.ClientTimeout(total=15)
-    app.bot_data['session'] = aiohttp.ClientSession(timeout=timeout)
-    print("Kertia starting... Engine online.")
+# --- HELPERS ---
+def get_eth_price():
+    """Get real ETH price from Birdeye. Fallback 2000 if fails."""
+    if not BIRDEYE_KEY:
+        return 2000
+    try:
+        url = "https://public-api.birdeye.so/defi/price?address=0x4200000000000000000000000006"
+        headers = {"X-API-KEY": BIRDEYE_KEY}
+        r = requests.get(url, headers=headers, timeout=5)
+        return float(r.json()["data"]["value"])
+    except:
+        return 2000
 
-async def close_session(app: Application):
-    session = app.bot_data.get('session')
-    if session:
-        await session.close()
-    print("Session closed cleanly.")
+def get_eth_balance(address):
+    wei = w3.eth.get_balance(Web3.to_checksum_address(address))
+    return float(w3.from_wei(wei, 'ether'))
 
-# --- ERROR HANDLER: Trojan Killer Graceful Shutdown ---
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    err = context.error
-    if "Conflict" in str(err) or "terminated by other getUpdates" in str(err):
-        print("Conflict state identified! Forcing instance shutdown to allow clean Railway takeover...")
-        sys.exit(1)
-    print(f"An error occurred: {err}")
+def check_gas():
+    balance = get_eth_balance(BOT_WALLET)
+    return balance >= MIN_GAS_ETH, balance
 
-# --- COMMANDS ---
+async def send_dev_fee(amount_eth):
+    """Sends 0.5% fee to cold wallet. Returns tx_hash or error."""
+    gas_ok, bal = check_gas()
+    if not gas_ok:
+        return None, f"LOW GAS: {bal:.6f} ETH. Top up bot wallet."
+    
+    if DRY_RUN:
+        return "0xDRYRUN", "Dry run mode"
+    
+    try:
+        nonce = w3.eth.get_transaction_count(BOT_WALLET)
+        tx = {
+            'nonce': nonce,
+            'to': DEV_WALLET_CHECKSUM,
+            'value': w3.to_wei(amount_eth, 'ether'),
+            'gas': 21000,
+            'gasPrice': w3.eth.gas_price,
+            'chainId': CHAIN_ID
+        }
+        signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        return w3.to_hex(tx_hash), None
+    except Exception as e:
+        return None, str(e)[:100]
+
+def calculate_fee_split(amount_usd):
+    eth_price = get_eth_price()
+    fee_usd = amount_usd * FEE_PERCENT
+    fee_eth = fee_usd / eth_price
+    swap_usd = amount_usd - fee_usd
+    return round(fee_usd, 4), round(fee_eth, 8), round(swap_usd, 4)
+
+# --- TELEGRAM COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_html(
-        "⚔️ <b>RAEL_KERTIA | TROJAN KILLER v1.3.2</b>\n\n"
-        "Deep contract scans + Snipe protection for Base, ETH, BSC.\n\n"
-        "<b>Commands:</b>\n"
-        "/scan &lt;chain&gt; &lt;address&gt; - Full token audit\n"
-        "/snipecheck &lt;chain&gt; &lt;address&gt; - Pre-launch safety check\n"
-        "/trade - Open Rael Terminal\n\n"
-        "<b>Example:</b> <code>/scan base 0x532f27101965dd16442E59d40670FaF5eBB142E4</code>\n\n"
-        "⚡ Zero fees. Max alpha."
-    )
-
-async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton(
-        "⚔️ Open Rael Terminal",
-        web_app=WebAppInfo(url="https://rael-kertia.vercel.app")
-    )]]
+    gas_ok, bal = check_gas()
+    status = "✅ LIVE" if gas_ok else "⚠️ LOW GAS"
     await update.message.reply_text(
-        "Launch the Rael_Kertia Terminal:",
-        reply_markup=InlineKeyboardMarkup(kb)
+        f"**Rael_Kertia Bot v2.0 {status}**\n\n"
+        f"Bot Wallet: `{BOT_WALLET[:6]}...{BOT_WALLET[-4:]}`\n"
+        f"Fee Wallet: `{DEV_COLD_WALLET[:6]}...{DEV_COLD_WALLET[-4:]}`\n"
+        f"Gas: `{bal:.6f} ETH`\n"
+        f"Fee: {FEE_PERCENT*100}% per trade\n\n"
+        f"Commands:\n/balance - Check wallets\n/testfee 100 - Test 0.5% on $100",
+        parse_mode='Markdown'
     )
 
-async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args)!= 2:
-        await update.message.reply_html(
-            "<b>Usage:</b> <code>/scan &lt;chain&gt; &lt;address&gt;</code>\n"
-            "<b>Example:</b> <code>/scan eth 0x...</code>"
-        )
-        return
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bot_eth = get_eth_balance(BOT_WALLET)
+    cold_eth = get_eth_balance(DEV_COLD_WALLET)
+    gas_ok, _ = check_gas()
+    eth_price = get_eth_price()
+    
+    status = "✅ OK" if gas_ok else "⚠️ TOP UP NOW"
+    
+    await update.message.reply_text(
+        f"**Wallet Status**\n\n"
+        f"Bot Gas: `{bot_eth:.6f} ETH` = `${bot_eth*eth_price:.2f}` {status}\n"
+        f"Cold Wallet: `{cold_eth:.6f} ETH` = `${cold_eth*eth_price:.2f}`\n"
+        f"ETH Price: `${eth_price:.0f}`\n\n"
+        f"Bot: `{BOT_WALLET}`\n"
+        f"Cold: `{DEV_COLD_WALLET}`",
+        parse_mode='Markdown'
+    )
 
-    chain, address = context.args
-    address = address.lower().strip()
-    chain_id = CHAIN_MAP.get(chain.lower())
-    if not chain_id:
-        await update.message.reply_html(f"❌ Unsupported chain: <code>{escape(chain)}</code>")
-        return
-
-    msg = await update.message.reply_text("⚔️ Running GodMode scan...")
-    session = context.application.bot_data['session']
-
-    be_chain = BIRDEYE_CHAIN.get(chain.lower(), 'ethereum')
-    dex_chain = DEX_CHAIN.get(chain.lower(), 'ethereum')
-
+async def test_fee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        gp_url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={address}"
-        be_url = f"https://public-api.birdeye.so/defi/token_overview?address={address}&chain={be_chain}"
-        dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-
-        headers = {"X-API-KEY": BIRDEYE_KEY, "x-chain": be_chain} if BIRDEYE_KEY else {}
-
-        gp_task = session.get(gp_url)
-        be_task = session.get(be_url, headers=headers)
-        dex_task = session.get(dex_url)
-        gp_res, be_res, dex_res = await asyncio.gather(gp_task, be_task, dex_task, return_exceptions=True)
-
-        print(f"SCAN: {chain}/{address}")
-        print(f"GoPlus: {gp_res.status if not isinstance(gp_res, Exception) else 'ERR'} | Birdeye: {be_res.status if not isinstance(be_res, Exception) else 'ERR'} | Dex: {dex_res.status if not isinstance(dex_res, Exception) else 'ERR'}")
-
-        gp_data = {}
-        if not isinstance(gp_res, Exception) and gp_res.status == 200:
-            gp_json = await gp_res.json()
-            raw_results = gp_json.get('result', {}) or {}
-            normalized_results = {str(k).lower(): v for k, v in raw_results.items()}
-            gp_data = normalized_results.get(address, {})
-
-        be_data = {}
-        if not isinstance(be_res, Exception) and be_res.status == 200:
-            be_json = await be_res.json()
-            be_data = be_json.get('data', {}) or {}
-
-        dex_data = {}
-        if not isinstance(dex_res, Exception) and dex_res.status == 200:
-            dex_json = await dex_res.json()
-            pairs = dex_json.get('pairs', [])
-            if pairs:
-                dex_data = next((p for p in pairs if str(p.get('chainId')).lower() == dex_chain), pairs[0])
-
-        if not gp_data and not be_data and not dex_data:
-            await msg.edit_text(f"❌ <b>Token not found</b>\n\nAddress <code>{address}</code> not indexed on {chain.upper()}.\n\nTry:\n1. Check chain is correct\n2. Token might be too new\n3. Use contract address, not pair")
+        amount = float(context.args[0])
+        fee_usd, fee_eth, swap_usd = calculate_fee_split(amount)
+        
+        tx_hash, error = await send_dev_fee(fee_eth)
+        
+        if error:
+            await update.message.reply_text(f"❌ Failed: {error}")
             return
+            
+        msg = f"**Test Trade ${amount}**\n\n"
+        msg += f"User pays: `${amount}`\n"
+        msg += f"Your fee: `${fee_usd}` = `{fee_eth} ETH`\n"
+        msg += f"User swaps: `${swap_usd}`\n"
+        msg += f"Fee Tx: `{tx_hash}`\n"
+        if not DRY_RUN and tx_hash!= "0xDRYRUN":
+            msg += f"View: https://basescan.org/tx/{tx_hash}\n"
+        msg += f"Mode: {'DRY_RUN' if DRY_RUN else 'LIVE'}"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        
+    except IndexError:
+        await update.message.reply_text("Usage: /testfee 100")
+    except ValueError:
+        await update.message.reply_text("Usage: /testfee 100 - must be a number")
 
-        def parse_tax(val):
-            try:
-                v = float(val or 0)
-                return v * 100 if 0 < v < 1.0 else v
-            except: return 0.0
-
-        is_hp = gp_data.get('is_honeypot', '0') == '1'
-        buy_tax = parse_tax(gp_data.get('buy_tax', '0'))
-        sell_tax = parse_tax(gp_data.get('sell_tax', '0'))
-        owner = gp_data.get('owner_address', 'None')
-        can_mint = gp_data.get('is_mintable', '0') == '1'
-        can_pause = gp_data.get('trading_pausable', '0') == '1'
-        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000000000000000dead', '0x0000000000000000']
-
-        hidden_tax = gp_data.get('hidden_owner', '0') == '1' or gp_data.get('cannot_buy', '0') == '1'
-        anti_whale = gp_data.get('is_anti_whale', '0') == '1' or float(gp_data.get('max_tx_amount', '0') or 0) > 0
-        cooldown = gp_data.get('trade_cooldown', '0') == '1' or int(gp_data.get('trade_cooldown', '0') or 0) > 0
-
-        lp_holders = gp_data.get('lp_holders', [])
-        lp_locked_pct = 0.0
-        if lp_holders:
-            try:
-                lp_locked_pct = sum(
-                    float(h.get('percent', 0) or 0)
-                    for h in lp_holders
-                    if any(x in str(h.get('address','')).lower() for x in ['dead', 'null', '0000'])
-                    or 'lock' in str(h.get('tag','')).lower()
-                    or h.get('is_locked') == 1
-                ) * 100
-            except: lp_locked_pct = 0.0
-
-        price = 0.0
-        mcap = 0.0
-        liquidity = 0.0
-
-        try: price = float(be_data.get('price') or 0)
-        except: pass
-        if price == 0:
-            try: price = float(dex_data.get('priceUsd') or 0)
-            except: pass
-
-        try: mcap = float(be_data.get('mc') or 0)
-        except: pass
-        if mcap == 0:
-            try: mcap = float(dex_data.get('fdv') or 0)
-            except: pass
-
-        try: liquidity = float(be_data.get('liquidity') or 0)
-        except: pass
-        if liquidity == 0:
-            try: liquidity = float(dex_data.get('liquidity', {}).get('usd') or 0)
-            except: pass
-
-        symbol = escape(gp_data.get('token_symbol') or be_data.get('symbol') or dex_data.get('baseToken', {}).get('symbol', 'UNKNOWN'))
-
-        price_change = dex_data.get('priceChange', {})
-        h1 = float(price_change.get('h1') or 0)
-        h24 = float(price_change.get('h24') or 0)
-        holders = int(gp_data.get('holder_count') or dex_data.get('info', {}).get('holders') or 0)
-        pair_addr = dex_data.get('pairAddress', '')
-
-        score = 100
-        threats = 0
-        if is_hp: score -= 50; threats += 1
-        if buy_tax > 10 or sell_tax > 10: score -= 25; threats += 1
-        if hidden_tax: score -= 30; threats += 1
-        if can_mint: score -= 15; threats += 1
-        if can_pause: score -= 15; threats += 1
-        if not owner_renounced: score -= 10; threats += 1
-        if lp_locked_pct < 50: score -= 20; threats += 1
-        if anti_whale: score -= 10
-        score = max(0, score)
-
-        if score > 75: verdict = "🟢 SAFE"
-        elif score > 40: verdict = "🟡 RISKY"
-        else: verdict = "🔴 RUG RISK"
-
-        owner_display = "Renounced" if owner_renounced else f"{owner[:6]}...{owner[-4:]}"
-        lp_status = f"{lp_locked_pct:.1f}% {'✅' if lp_locked_pct > 80 else '⚠️' if lp_locked_pct > 50 else '❌ UNLOCKED'}"
-        tax_display = f"Buy/Sell {buy_tax:.1f}%/{sell_tax:.1f}% {'✅' if buy_tax < 5 and sell_tax < 5 else '⚠️' if buy_tax < 10 else '🚨'}"
-
-        result = f"""⚔️ <b>RAEL_KERTIA AUDIT: ${symbol}</b>
-<code>{address[:6]}...{address[-4:]}</code> | {chain.upper()}
-
-🛡️ <b>Score: {score}/100 | {verdict.replace('🟢 ','').replace('🟡 ','').replace('🔴 ','')}</b>
-——————————————————
-
-- <b>Honeypot:</b> {'🚨 YES' if is_hp else '✅ No'}
-- <b>Taxes:</b> {tax_display}
-- <b>LP Locked:</b> {lp_status}
-- <b>Ownership:</b> {'✅ ' if owner_renounced else '⚠️ '}{owner_display}
-- <b>Hidden Tax:</b> {'🚨 DETECTED' if hidden_tax else '✅ No'}
-- <b>Anti-Whale:</b> {'⚠️ Enabled' if anti_whale else '✅ No'}
-- <b>Mintable:</b> {'🚨 Yes' if can_mint else '✅ No'}
-- <b>Cooldown:</b> {'⚠️ Enabled' if cooldown else '✅ None'}
-- <b>Whale Risk:</b> {'⚠️ High' if anti_whale else '✅ Low'}
-——————————————————
-
-💰 <b>Live Alpha:</b>
-- <b>Price:</b> ${price:.8f}
-- <b>1h:</b> {'📉' if h1 < 0 else '📈'} {h1:.1f}% | <b>24h:</b> {h24:.1f}%
-- <b>MC:</b> ${mcap:,.0f} | <b>Liquidity:</b> ${liquidity:,.0f}
-- <b>Holders:</b> {holders}
-"""
-
-        if hidden_tax:
-            result += "\n⚠️ <b>Trojan didn't see this! Hidden Tax detected.</b>"
-        if anti_whale and not is_hp:
-            result += "\n⚠️ <b>Soft Honeypot: Anti-whale limits selling.</b>"
-        if 0 < lp_locked_pct < 50:
-            result += "\n⚠️ <b>Rug Risk: LP not locked safely.</b>"
-        if lp_locked_pct == 0 and liquidity > 1000:
-            result += "\n⚠️ <b>Rug Risk: LP completely unlocked.</b>"
-
-        result += f"\n\n🛡️ <i>Scanned by Rael_Kertia | Threats Neutralized: {threats}</i>"
-
-        kb = []
-        if pair_addr:
-            kb.append([InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{dex_chain}/{pair_addr}")])
-        kb.append([InlineKeyboardButton("🛡️ GoPlus Report", url=f"https://gopluslabs.io/token-security/{chain_id}/{address}")])
-
-        await msg.edit_text(result, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb), disable_web_page_preview=True)
-
-    except Exception as e:
-        print(f"SCAN CRASH: {e}")
-        await msg.edit_text(f"❌ Scan execution failed: {escape(str(e)[:120])}")
-
-async def snipecheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args)!= 2:
-        await update.message.reply_html(
-            "<b>Usage:</b> <code>/snipecheck &lt;chain&gt; &lt;address&gt;</code>\n"
-            "<b>Example:</b> <code>/snipecheck base 0x...</code>"
-        )
-        return
-
-    chain, address = context.args
-    address = address.lower().strip()
-    chain_id = CHAIN_MAP.get(chain.lower())
-    if not chain_id:
-        await update.message.reply_html(f"❌ Unsupported chain: <code>{escape(chain)}</code>")
-        return
-
-    msg = await update.message.reply_text("🎯 Running snipe pre-check...")
-    session = context.application.bot_data['session']
-
-    try:
-        gp_url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={address}"
-        async with session.get(gp_url) as res:
-            data = await res.json()
-
-        if data.get('code')!= 1 or not data.get('result'):
-            await msg.edit_text("❌ Token metadata verification empty. Check configuration details.")
-            return
-
-        raw_results = data.get('result', {}) or {}
-        normalized_results = {str(k).lower(): v for k, v in raw_results.items()}
-        gp_data = normalized_results.get(address, {})
-
-        if not gp_data:
-            await msg.edit_text("❌ Token parsing data failed. Address could be unindexed.")
-            return
-
-        is_hp = gp_data.get('is_honeypot', '0') == '1'
-        owner = gp_data.get('owner_address', 'None')
-        owner_renounced = owner.lower() in ['', '0x0000000000000000', 'none', '0x000000000000dead']
-        hidden_tax = gp_data.get('hidden_owner', '0') == '1' or gp_data.get('cannot_buy', '0') == '1'
-
-        if is_hp: verdict = "🔴 FATAL: Honeypot Detected"
-        elif hidden_tax: verdict = "🔴 FATAL: Hidden Tax / Purchase Block"
-        elif not owner_renounced: verdict = "🟡 HIGH RISK: Owner Not Renounced"
-        else: verdict = "🟢 CLEAR: No blocking risks detected"
-
-        result = f"""⚔️ <b>RAEL_KERTIA SNIPECHECK</b>
-<code>{address[:6]}...{address[-4:]}</code> | {chain.upper()}
-——————————————————
-<b>Verdict: {verdict}</b>
-
-- <b>Honeypot:</b> {'🚨 YES' if is_hp else '✅ No'}
-- <b>Ownership:</b> {'✅ Renounced' if owner_renounced else '⚠️ Not Renounced'}
-- <b>Hidden Tax:</b> {'🚨 Detected' if hidden_tax else '✅ No'}
-- <b>Mintable:</b> {'🚨 Yes' if gp_data.get('is_mintable', '0') == '1' else '✅ No'}
-
-⚡ <i>Snipe at your own risk. Trojan Killer engaged.</i>"""
-
-        await msg.edit_text(result, parse_mode='HTML')
-
-    except Exception as e:
-        await msg.edit_text(f"❌ Snipecheck failed: {escape(str(e)[:120])}")
-
-# --- MAIN ENGINE ENTRY ---
 def main():
-    app = Application.builder().token(TOKEN).build()
-
-    app.post_init = init_session
-    app.post_shutdown = close_session
-
+    if not all([BOT_TOKEN, DEV_COLD_WALLET, PRIVATE_KEY]):
+        raise ValueError("Missing TELEGRAM_TOKEN, DEV_COLD_WALLET, or BOT_WALLET_PRIVATE_KEY")
+    
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("scan", scan))
-    app.add_handler(CommandHandler("snipecheck", snipecheck))
-    app.add_handler(CommandHandler("trade", trade))
-    app.add_error_handler(error_handler)
-
-    print("Bot ready - polling Telegram")
-    app.run_polling(drop_pending_updates=True)
+    app.add_handler(CommandHandler("balance", balance))
+    app.add_handler(CommandHandler("testfee", test_fee))
+    
+    print(f"Bot LIVE. Gas wallet: {BOT_WALLET}. Fees to: {DEV_COLD_WALLET}")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
