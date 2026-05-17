@@ -104,8 +104,9 @@ async def close_session(app: Application):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err = context.error
     if "Conflict" in str(err) or "terminated by other getUpdates" in str(err):
-        print("Clash identified. Shutting down process stack cleanly to clear port access...")
-        sys.exit(1)
+        print("Telegram API collision detected. Holding for 10 seconds to let ghost connections clear...")
+        await asyncio.sleep(10)
+        return
 
 # --- ENGINE COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
