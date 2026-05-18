@@ -358,7 +358,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output += f"\n\n🛡️ <i>Scanned by Rael_Kertia | Threats Neutralized: {threats}</i>"
 
         kb = [
-            [InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{DEX_CHAIN.get(chain, 'base')}/{address}")],
+            [InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/{(chain, 'base')}/{address}")],
             [InlineKeyboardButton("🛡️ GoPlus Report", url=f"https://gopluslabs.io/token-security/{chain_id}/{address}")]
         ]
 
@@ -388,14 +388,34 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html("❌ Currently optimized only for Base mainnet.")
         return
 
+    # --- FIXED ADDRESS VALIDATION BLOCK ---
     try:
-        target_address = Web3.to_checksum_address(cleaned_addr)
-    except ValueError:
-        await update.message.reply_html(f"❌ Invalid address: <code>{escape(raw_addr)}</code>")
+        # 1. Strip whitespace/newlines that Telegram adds
+        cleaned_addr = cleaned_addr.strip().replace('\n', '').replace(' ', '')
+
+        # 2. Check if valid address using lowercase to handle WETH padding bug
+        if not Web3.isAddress(cleaned_addr.lower()):
+            await update.message.reply_html(f"❌ Invalid address: <code>{escape(raw_addr)}</code>")
+            return
+
+        # 3. Normalize to checksum - this fixes 0x4200...0006 lowercase rejection
+        target_address = Web3.toChecksumAddress(cleaned_addr.lower())
+
+        # 4. Block zero address only, not addresses with zeros
+        if target_address == "0x0000000000000000":
+            await update.message.reply_html("❌ Invalid address: Cannot snipe ETH")
+            return
+
+    except Exception as e:
+        await update.message.reply_html(f"❌ Invalid address: <code>{escape(str(e)[:100])}</code>")
         return
+    # --- END FIX ---
 
     try:
         amount_eth = float(context.args[-1])
+        if amount_eth <= 0:
+            await update.message.reply_html("❌ ETH amount must be > 0")
+            return
     except ValueError:
         await update.message.reply_html("❌ Invalid ETH amount.")
         return
@@ -429,7 +449,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(f"❌ Aborted: Balance too low ({current_gas_bal:.5f} ETH). Use /wallet to deposit.")
             return
 
-        weth_address = Web3.to_checksum_address(WETH_ADDRESS_CORRECT)
+        weth_address = Web3.toChecksumAddress(WETH_ADDRESS_CORRECT)
 
         # EIP-1559 Gas
         latest_block = w3.eth.get_block('latest')
@@ -457,7 +477,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ref_payout > 0 and ref_address:
             ref_tx = {
                 'nonce': current_nonce,
-                'to': Web3.to_checksum_address(ref_address),
+                'to': Web3.toChecksumAddress(ref_address),
                 'value': w3.to_wei(ref_payout, 'ether'),
                 'gas': 21000,
                 'maxFeePerGas': max_fee,
@@ -473,7 +493,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_users(users)
 
         # 3. Swap TX
-        router = w3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_ROUTER_ADDRESS), abi=UNISWAP_V2_ROUTER_ABI)
+        router = w3.eth.contract(address=Web3.toChecksumAddress(UNISWAP_V2_ROUTER_ADDRESS), abi=UNISWAP_V2_ROUTER_ABI)
         path = [weth_address, target_address]
         deadline = latest_block['timestamp'] + 300
 
