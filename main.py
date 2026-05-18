@@ -148,6 +148,24 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         sys.exit(1)
 
 # --- ENGINE COMMANDS ---
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    test_addr = "0x4200000000000006" # WETH
+    try:
+        # This is your exact validation logic from /snipe
+        cleaned_addr = test_addr.strip().replace('\n', '').replace(' ', '')
+        is_valid = Web3.isAddress(cleaned_addr.lower())
+        checksum = Web3.toChecksumAddress(cleaned_addr.lower()) if is_valid else "Invalid"
+        
+        await update.message.reply_html(
+            f"⚔️ <b>Rael Engine Check</b>\n\n"
+            f"WETH Test: <code>{test_addr}</code>\n"
+            f"Valid: <code>{is_valid}</code>\n"
+            f"Checksum: <code>{checksum}</code>\n\n"
+            f"{'✅ Validation working' if is_valid else '❌ Validation broken'}"
+        )
+    except Exception as e:
+        await update.message.reply_html(f"❌ Engine Error: {escape(str(e))}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     users = load_users()
@@ -176,7 +194,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/referral - Get your invite link & stats\n"
         "/scan [chain] [address] - Security Audit\n"
         "/snipe [chain] [address] [amount_eth] - Execute Trade\n"
-        "/trade - Launch GUI Terminal"
+        "/trade - Launch GUI Terminal\n"
+        "/ping - Engine health check"
     )
 
 async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -550,6 +569,7 @@ if __name__ == "__main__":
     application.post_init = init_session
     application.post_stop = close_session
     application.add_error_handler(error_handler)
+    application.add_handler(CommandHandler("ping", ping))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setup", setup))
     application.add_handler(CommandHandler("wallet", wallet))
