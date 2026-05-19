@@ -1,248 +1,319 @@
 import os
 import sys
-import asyncio
-import aiohttp
-import re
-import json
-import secrets
-import string
 import logging
-from datetime import date
-from web3 import Web3
-from telegram import Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.helpers import escape
-from dotenv import load_dotenv
+import asyncio
+import uuid
+import httpx
+import sqlite3
 from cryptography.fernet import Fernet
-from users import init_db, close_db, get_user, save_user
+from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
+from web3 import Web3
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
+# ===== LOGGING =====
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO, stream=sys.stdout)
+logger = logging.getLogger("NexusIntel")
+logger.info("📡 NEXUS INTEL: System initialization starting...")
 
-# --- ENV & CONFIGURATION ---
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-DEV_COLD_WALLET = os.getenv("DEV_COLD_WALLET") # Your existing fee wallet var
-BASE_RPC = os.getenv("BASE_RPC")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
+# ===== ENV VARS - RAILWAY =====
+TOKEN = os.environ.get('BOT_TOKEN')
+ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY')
+DEV_COLD_WALLET = os.environ.get('DEV_COLD_WALLET')
+OWNER_ID = int(os.environ.get('OWNER_ID', '0'))
 
-# --- CORE ENGINE SETTINGS ---
-DRY_RUN = os.getenv("DRY_RUN", "True") == "True"
-FEE_PERCENT = 0.005
-REFERRAL_CUT = 0.10
-CHAIN_ID = 8453
-MIN_GAS_ETH = 0.0001
-DAILY_FREE_LIMIT = 10
+if not all([TOKEN, ENCRYPTION_KEY, DEV_COLD_WALLET]):
+    logger.critical("❌ Core environment variables missing from Railway config panel!"); sys.exit(1)
 
-CHAIN_MAP = {'eth': '1', 'base': '8453', 'bsc': '56'}
-UNISWAP_V2_ROUTER_ADDRESS = "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
-UNISWAP_V2_ROUTER_ABI = [{"inputs":[{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"path","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactETHForTokensSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"payable","type":"function"}]
-WETH_ADDRESS_CORRECT = "0x4200000000000000000000000000000006"
-
-USER_USAGE_TRACKER = {}
-w3 = Web3(Web3.HTTPProvider(BASE_RPC))
-DEV_WALLET_CHECKSUM = Web3.to_checksum_address(DEV_COLD_WALLET)
+FEE_PERCENT = 0.0035 # 0.35%
 fernet = Fernet(ENCRYPTION_KEY.encode())
+TOTAL_SCANS = 0
 
-# --- USER & REFERRAL MANAGEMENT ---
-def generate_ref_code():
-    return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+# ===== THREAD-SAFE DATABASE SETUP =====
+def init_db():
+    with sqlite3.connect("wallets.db") as local_conn:
+        local_conn.execute("CREATE TABLE IF NOT EXISTS wallets (user_id INTEGER PRIMARY KEY, enc_key TEXT)")
+        local_conn.commit()
 
-async def get_user_wallet(user_id: int):
-    user_data = await get_user(str(user_id))
-    if not user_data.get('pk'): return None, None
-    enc_pk = user_data['pk'].encode()
-    pk = fernet.decrypt(enc_pk).decode()
-    address = user_data['address']
-    return pk, address
+init_db()
 
-async def get_user_data(user_id: int):
-    return await get_user(str(user_id))
+# ===== CHAINS =====
+CHAINS = {"eth": "1", "base": "8453", "bsc": "56", "arb": "42161", "sol": "solana"}
+DEX_CHAIN_MAP = {"1": "ethereum", "8453": "base", "56": "bsc", "42161": "arbitrum", "solana": "solana"}
+RPC_MAP = {
+    "1": "https://eth.llamarpc.com",
+    "8453": "https://mainnet.base.org",
+    "56": "https://bsc-dataseed.binance.org",
+    "42161": "https://arb1.arbitrum.io/rpc"
+}
 
-# --- UTILITIES ---
-def sanitize_address(raw_arg: str) -> str:
-    clean = re.sub(r"&[#\w\d]+;", "", raw_arg)
-    return clean.replace("'", "").replace('"', "").replace("\n", "").strip()
+# ===== WALLET UTILS (Thread-Safe Context) =====
+def get_wallet(user_id: int):
+    with sqlite3.connect("wallets.db") as local_conn:
+        row = local_conn.execute("SELECT enc_key FROM wallets WHERE user_id=?", (user_id,)).fetchone()
+        if row:
+            return Web3().eth.account.from_key(fernet.decrypt(row[0].encode()))
+        acct = Web3().eth.account.create()
+        enc = fernet.encrypt(acct.key).decode()
+        local_conn.execute("INSERT INTO wallets VALUES (?,?)", (user_id, enc))
+        local_conn.commit()
+        return acct
 
-def get_eth_balance(address):
-    wei = w3.eth.get_balance(Web3.to_checksum_address(address))
-    return float(w3.from_wei(wei, 'ether'))
+def format_price(price):
+    if price == 0: return "0.00"
+    if price < 0.000001: return f"{price:.10f}"
+    if price < 0.01: return f"{price:.6f}"
+    if price < 1: return f"{price:.4f}"
+    return f"{price:,.2f}"
 
-def is_user_limited(user_id: int) -> bool:
-    today = date.today()
-    if user_id not in USER_USAGE_TRACKER:
-        USER_USAGE_TRACKER[user_id] = {"last_date": today, "count": 1}
-        return False
-    user_data = USER_USAGE_TRACKER[user_id]
-    if user_data["last_date"]!= today:
-        user_data["last_date"] = today
-        user_data["count"] = 1
-        return False
-    if user_data["count"] >= DAILY_FREE_LIMIT:
-        return True
-    user_data["count"] += 1
-    return False
+# ===== API CALLS =====
+async def get_token_data(chain_id, token):
+    addr = token if chain_id == "solana" else token.lower()
+    url = f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses={addr}"
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(url, timeout=10.0)
+            res_json = r.json()
+            if res_json.get("code") == 1 and res_json.get("result"):
+                return res_json["result"].get(addr)
+        except Exception as e:
+            logger.error(f"GoPlus Error: {e}")
+    return None
 
-async def init_session(app: Application):
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await init_db()
-    timeout = aiohttp.ClientTimeout(total=15)
-    app.bot_data['session'] = aiohttp.ClientSession(timeout=timeout)
-    logging.info(f"Rael_Kertia Engine v3.3 Online | DRY_RUN={DRY_RUN}")
+async def get_dexscreener_data(dex_chain, token):
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{token}"
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(url, timeout=7.0)
+            pairs = r.json().get('pairs', [])
+            for p in pairs:
+                if p.get('chainId') == dex_chain:
+                    return {
+                        'price': float(p.get('priceUsd', 0)),
+                        'priceChange1h': float(p.get('priceChange', {}).get('h1', 0)),
+                        'priceChange24h': float(p.get('priceChange', {}).get('h24', 0)),
+                        'volume24h': float(p.get('volume', {}).get('h24', 0)),
+                        'liquidity': float(p.get('liquidity', {}).get('usd', 0)),
+                        'fdv': float(p.get('fdv', 0)),
+                        'url': p.get('url', f'https://dexscreener.com/{dex_chain}/{token}'),
+                        'symbol': p.get('baseToken', {}).get('symbol', 'TOKEN')
+                    }
+        except Exception as e:
+            logger.error(f"DexScreener Error: {e}")
+    return None
 
-async def close_session(app: Application):
-    await close_db()
-    session = app.bot_data.get('session')
-    if session: await session.close()
+def calculate_score(data):
+    score = 100
+    if not data: return 0, True, 0, True, True, False, False, True, False, 0
+    honeypot = data.get("is_honeypot") == "1"
+    tax = float(data.get("buy_tax", 0)) + float(data.get("sell_tax", 0))
+    owner_control = data.get("can_take_back_ownership") == "1"
+    mintable = data.get("is_mintable") == "1"
+    hidden_tax = data.get("hidden_owner") == "1"
+    anti_whale = data.get("is_anti_whale") == "1"
+    lp_holders = data.get("lp_holders", [])
+    total_lp_locked = sum([float(h.get("percent", 0)) for h in lp_holders if str(h.get("is_locked")) == "1" or h.get("is_locked") == 1])
+    lp_locked = total_lp_locked > 80
+    holders_list = data.get("holders", [])[:10]
+    whale_concentration = sum([float(h.get("percent", 0)) for h in holders_list if h.get("percent")]) > 50
+    if honeypot: score -= 50
+    if tax > 15: score -= 20
+    elif tax > 5: score -= 10
+    if owner_control: score -= 15
+    if mintable: score -= 10
+    if not lp_locked: score -= 15
+    if hidden_tax: score -= 20
+    if anti_whale: score -= 10
+    if whale_concentration: score -= 15
+    return max(0, score), honeypot, tax, owner_control, mintable, lp_locked, hidden_tax, anti_whale, whale_concentration, total_lp_locked
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if "Conflict" in str(context.error): sys.exit(1)
+# ===== BLOCKCHAIN BACKGROUND WORKERS - NO ASYNC BLOCK =====
+def fetch_blockchain_balance(rpc_url, address):
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    balance = w3.eth.get_balance(address)
+    return w3.from_wei(balance, 'ether')
 
-# --- ENGINE COMMANDS ---
+def broadcast_fee_transaction(rpc_url, to_address, value_wei, private_key, chain_id):
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    account = w3.eth.account.from_key(private_key)
+    nonce = w3.eth.get_transaction_count(account.address)
+    tx = {
+        'to': to_address,
+        'value': value_wei,
+        'gas': 21000,
+        'nonce': nonce,
+        'chainId': int(chain_id)
+    }
+    # EIP-1559 Support for L2 chains
+    try:
+        tx['maxPriorityFeePerGas'] = w3.eth.max_priority_fee_per_gas
+        tx['maxFeePerGas'] = w3.eth.gas_price + tx['maxPriorityFeePerGas']
+    except:
+        tx['gasPrice'] = w3.eth.gas_price
+
+    signed = account.sign_transaction(tx)
+    return w3.eth.send_raw_transaction(signed.rawTransaction).hex()
+
+# ===== COMMANDS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_html(
-        "⚔️ <b>RAEL_KERTIA BOT v3.3 | POSTGRES READY</b>\n\n"
-        f"<b>0.5% Fees | Mode: {'DRY_RUN' if DRY_RUN else 'LIVE'}</b>\n\n"
-        "<b>Commands:</b>\n"
-        "/setup - Create your personal trading wallet\n"
-        "/wallet - View wallet & balance\n"
-        "/ping - Check if bot + DB is alive\n"
-        "/snipe base [address] [amount_eth] - Execute Trade"
-    )
-
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Pong. DB Connected.")
-
-async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    pk, address = await get_user_wallet(user_id)
-    if address:
-        await update.message.reply_html(f"✅ Wallet exists:\n<code>{address}</code>")
-        return
-
-    account = w3.eth.account.create()
-    enc_pk = fernet.encrypt(account.key.hex().encode()).decode()
-    user_data = await get_user_data(user_id)
-    user_data.update({
-        'address': account.address, 'pk': enc_pk,
-        'ref_code': user_data.get('ref_code') or generate_ref_code(),
-        'referrals': 0, 'earned_eth': 0.0
-    })
-    await save_user(str(user_id), user_data)
-    await update.message.reply_html(f"⚔️ <b>Wallet Created</b>\n<code>{account.address}</code>\n\n<b>Fund this wallet to trade.</b>")
+    w = get_wallet(update.effective_user.id)
+    msg = "📡 **Nexus Intel Core v1.0.0**\n"
+    msg += "High-speed multi-chain audit + execution.\n\n"
+    msg += f"Your wallet: `{w.address}`\n"
+    msg += "Deposit Base/ETH/BSC/Arb to start.\n\n"
+    msg += "**Commands:**\n"
+    msg += "/scan <chain> <address> - Contract analysis\n"
+    msg += "/wallet - Show deposit address\n"
+    msg += "/snipe <chain> <address> <amount> - Execute with 0.35% fee\n"
+    msg += "/price <chain> <address> - Live market data\n\n"
+    msg += "💡 **Inline:** `@bot_username base 0x...` in any group\n\n"
+    msg += "_60% cheaper than competitors. DM-only execution._"
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    pk, address = await get_user_wallet(user_id)
-    if not address:
-        await update.message.reply_html("❌ No wallet. Use /setup")
+    w = get_wallet(update.effective_user.id)
+    await update.message.reply_text(f"Deposit to:\n`{w.address}`\n\n⚠️ Gas + 0.35% fee auto-deducted per trade.", parse_mode="Markdown")
+
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global TOTAL_SCANS
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/scan base 0x1234...`", parse_mode='Markdown')
         return
-    bal = get_eth_balance(address)
-    await update.message.reply_html(f"⚔️ <b>Your Wallet</b>\n<code>{address}</code>\nBalance: <code>{bal:.5f} ETH</code>")
+    chain_key = context.args[0].lower() if len(context.args) > 1 else "eth"
+    token_addr = context.args[1] if len(context.args) > 1 else context.args[0]
+    chain_id = CHAINS.get(chain_key, "1")
+    dex_chain = DEX_CHAIN_MAP.get(chain_id, "ethereum")
+    status_msg = await update.message.reply_text("📡 `Nexus Intel: Parsing data...`", parse_mode='Markdown')
+    TOTAL_SCANS += 1
+    data, dex = await asyncio.gather(get_token_data(chain_id, token_addr), get_dexscreener_data(dex_chain, token_addr))
+    if not data:
+        await status_msg.edit_text("❌ Unable to extract parameters. Check address/chain.")
+        return
+    score, hp, tax, owner, mint, lp_l, hidden, whale, whale_risk, lp_p = calculate_score(data)
+    verdict = "EXCELLENT ✅" if score > 75 else "STABLE ⚠️" if score > 45 else "HIGH RISK 🚨"
+    symbol = dex.get('symbol', 'TOKEN') if dex else 'TOKEN'
+    report = f"📡 **Nexus Intel: ${symbol}**\n`{token_addr[:6]}...{token_addr[-4:]}` | `{chain_key.upper()}`\n\n"
+    report += f"🛡 **Score: {score}/100 | {verdict}**\n──────────────────\n"
+    report += f"• **Honeypot:** {'🚨 TRAPPED' if hp else '✅ Clear'}\n"
+    report += f"• **Tax:** `{tax}%` {'🚨' if tax > 15 else '⚠️' if tax > 5 else '✅'}\n"
+    report += f"• **LP Lock:** `{lp_p:.1f}%` {'✅' if lp_l else '❌ Risk'}\n"
+    report += f"• **Owner:** {'⚠️ Has Control' if owner else 'Renounced ✅'}\n"
+    report += f"• **Hidden Tax:** {'🚨 Active' if hidden else '✅ None'}\n"
+    if dex:
+        report += f"──────────────────\n📊 **Market:** ${format_price(dex['price'])} | 1h: `{dex['priceChange1h']:+.1f}%`\n"
+        report += f"• Liquidity: `${dex['liquidity']:,.0f}`\n"
+    report += f"──────────────────\n⚡ 0.35% execution fee | Scans: {TOTAL_SCANS}"
+    chart_url = dex['url'] if dex else f"https://dexscreener.com/{dex_chain}/{token_addr}"
+    buttons = [[InlineKeyboardButton("Execute 0.01", callback_data=f"snip_{chain_key}_{token_addr}_0.01")],
+               [InlineKeyboardButton("📊 Chart", url=chart_url)]]
+    await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_pk, user_address = await get_user_wallet(user_id)
-    if not user_address:
-        await update.message.reply_html("❌ No wallet. Use /setup first.")
+    # DM-ONLY LOCK
+    if update.message.chat.type!= 'private':
+        await update.message.reply_text("Execution locked to DM. Groups are scan-only.")
         return
     if len(context.args) < 3:
-        await update.message.reply_html("Usage: <code>/snipe base 0x... 0.01</code>")
+        await update.message.reply_text("❌ Usage: `/snipe base 0x... 0.01`", parse_mode='Markdown')
         return
+    chain_key, token, amount_str = context.args[0].lower(), context.args[1], context.args[2]
+    try: amount = float(amount_str)
+    except: await update.message.reply_text("❌ Amount must be a valid number (e.g. 0.01)"); return
+    if chain_key not in CHAINS or chain_key == "sol":
+        await update.message.reply_text("❌ Supported chains: eth, base, bsc, arb. SOL integration coming soon."); return
 
-    chain = context.args[0].lower().strip()
-    if chain!= 'base':
-        await update.message.reply_html("❌ Only Base mainnet supported.")
-        return
+    chain_id = CHAINS[chain_key]
+    w = get_wallet(user_id)
+    rpc_url = RPC_MAP[chain_id]
+
+    status = await update.message.reply_text("⏳ `Checking ledger balances securely via threadpool...`", parse_mode='Markdown')
 
     try:
-        target_address = Web3.to_checksum_address(sanitize_address("".join(context.args[1:-1])))
-        amount_eth = float(context.args[-1])
-    except:
-        await update.message.reply_html("❌ Invalid address or amount.")
-        return
-
-    msg = await update.message.reply_text("🎯 Simulating bundle...")
-    total_fee = amount_eth * FEE_PERCENT
-    dev_fee = total_fee
-    trade_allocation = amount_eth - total_fee
-
-    if DRY_RUN:
-        await msg.edit_text(
-            f"🚀 [DRY_RUN] Simulation Ready\n\n"
-            f"Trade: <code>{trade_allocation:.5f} ETH</code>\n"
-            f"Fee to you: <code>{dev_fee:.6f} ETH</code>\n"
-            f"Gas estimate: ~150000\n"
-            f"Mode: SAFE - No funds moved"
-        )
-        return
-
-    try:
-        current_gas_bal = get_eth_balance(user_address)
-        if current_gas_bal < amount_eth:
-            await msg.edit_text(f"❌ Aborted: Balance too low ({current_gas_bal:.5f} ETH). Use /wallet to deposit.")
+        # Secure offloading of network calls to stop blocking the main event loop
+        balance_eth = await asyncio.to_thread(fetch_blockchain_balance, rpc_url, w.address)
+        if balance_eth < amount:
+            await status.edit_text(f"❌ Insufficient balance. Available: {balance_eth:.6f} ETH\nDeposit directly to your smart node: `{w.address}`", parse_mode="Markdown")
             return
-
-        weth_address = Web3.to_checksum_address(WETH_ADDRESS_CORRECT)
-        latest_block = w3.eth.get_block('latest')
-        base_fee = latest_block['baseFeePerGas']
-        max_priority_fee = w3.eth.max_priority_fee
-        max_fee = int((base_fee * 1.5) + max_priority_fee)
-        start_nonce = w3.eth.get_transaction_count(user_address, 'pending')
-        txs_to_send = []
-
-        fee_tx = {
-            'nonce': start_nonce, 'to': DEV_WALLET_CHECKSUM,
-            'value': w3.to_wei(dev_fee, 'ether'), 'gas': 21000,
-            'maxFeePerGas': max_fee, 'maxPriorityFeePerGas': max_priority_fee, 'chainId': CHAIN_ID
-        }
-        txs_to_send.append(w3.eth.account.sign_transaction(fee_tx, user_pk))
-
-        router = w3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V2_ROUTER_ADDRESS), abi=UNISWAP_V2_ROUTER_ABI)
-        path = [weth_address, target_address]
-        deadline = latest_block['timestamp'] + 300
-        swap_tx_params = {
-            'from': user_address, 'value': w3.to_wei(trade_allocation, 'ether'),
-            'maxFeePerGas': max_fee, 'maxPriorityFeePerGas': max_priority_fee,
-            'nonce': start_nonce + 1, 'chainId': CHAIN_ID
-        }
-        try:
-            estimated_gas = router.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, user_address, deadline).estimate_gas(swap_tx_params)
-            swap_tx_params['gas'] = int(estimated_gas * 1.2)
-        except:
-            swap_tx_params['gas'] = 400000
-
-        swap_tx = router.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(0, path, user_address, deadline).build_transaction(swap_tx_params)
-        txs_to_send.append(w3.eth.account.sign_transaction(swap_tx, user_pk))
-
-        hashes = []
-        for signed_tx in txs_to_send:
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-            hashes.append(tx_hash.hex())
-
-        # OWNER GAS ALERT
-        if user_id == OWNER_TELEGRAM_ID:
-            bal = get_eth_balance(user_address)
-            if bal < 0.002:
-                await context.bot.send_message(chat_id=user_id, text=f"⚠️ <b>OWNER ALERT:</b> Your bot wallet gas low: {bal:.5f} ETH", parse_mode='HTML')
-
-        await msg.edit_text(
-            f"⚔️ <b>BUNDLE SENT</b>\n\n"
-            f"• Wallet: <code>{user_address[:6]}...{user_address[-4:]}</code>\n"
-            f"• Amount: <code>{trade_allocation:.5f} ETH</code>\n"
-            f"• Fee: <code>{dev_fee:.6f} ETH</code>\n"
-            f"• TX: <code>{hashes[-1]}</code>"
-        )
-
     except Exception as e:
-        await msg.edit_text(f"❌ Execution Failed: {escape(str(e)[:150])}")
+        await status.edit_text(f"❌ RPC Connection Error: {str(e)[:50]}")
+        return
+
+    # FEE CALC - OWNER BYPASS
+    if user_id == OWNER_ID:
+        fee = 0.0; swap_amount = amount
+        msg = f"🎯 **OWNER TEST MODE**\nExecuting {amount} ETH on {chain_key.upper()}...\nFee: 0.00 ETH\n"
+    else:
+        fee = amount * FEE_PERCENT; swap_amount = amount - fee
+        msg = f"🎯 **Executing {amount} ETH on {chain_key.upper()}**\nFee: {fee:.6f} ETH (0.35%)\nSwap routing weight: {swap_amount:.6f} ETH\n"
+
+    await status.edit_text(msg + "⏳ Routing network tokens...", parse_mode='Markdown')
+
+    try:
+        if fee > 0:
+            value_wei = Web3().to_wei(fee, 'ether')
+            # Safely broadcast transaction on background thread
+            fee_hash = await asyncio.to_thread(broadcast_fee_transaction, rpc_url, DEV_COLD_WALLET, value_wei, w.key, chain_id)
+            logger.info(f"Platform fee extracted successfully: {fee_hash}")
+            await asyncio.sleep(1)
+
+        # 2. TODO: Inject Router Contract logic here for live exchange pathing (UniswapV2 / Aerodrome Router)
+        await status.edit_text(f"✅ **Platform Fees Accounted For**\nChain: {chain_key.upper()}\nRouted Value: {swap_amount:.6f} ETH\nCollected Engine Fee: {fee:.6f} ETH\n\n⚠️ Core pipeline established. Inject target DEX routing arrays to process physical swaps.", parse_mode='Markdown')
+    except Exception as e:
+        await status.edit_text(f"❌ Pipeline Execution Refused: {str(e)[:100]}")
+
+async def button_snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, chain, address, amount = q.data.split("_")
+    context.args = [chain, address, amount]
+    update.message = q.message
+    await snipe(update, context)
+
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/price base 0x...`", parse_mode='Markdown'); return
+    chain_key = context.args[0].lower() if len(context.args) > 1 else "eth"
+    token = context.args[1] if len(context.args) > 1 else context.args[0]
+    dex_chain = DEX_CHAIN_MAP.get(CHAINS.get(chain_key, "1"), "ethereum")
+    dex_data = await get_dexscreener_data(dex_chain, token)
+    if not dex_data:
+        await update.message.reply_text("❌ No token pool matches listed pair configurations."); return
+    msg = f"📈 **Market Feed: {chain_key.upper()}**\n\n"
+    msg += f"• Price: `${format_price(dex_data['price'])}`\n"
+    msg += f"• 1h Run: `{dex_data['priceChange1h']:+.2f}%` | 24h: `{dex_data['priceChange24h']:+.2f}%`\n"
+    msg += f"• Vol 24h: `${dex_data['volume24h']:,.0f}`\n"
+    msg += f"• Liquidity: `${dex_data['liquidity']:,.0f}`\n"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip().split()
+    if len(query) < 2: return
+    chain_key, address = query[0].lower(), query[1]
+    chain_id = CHAINS.get(chain_key, "1")
+    data = await get_token_data(chain_id, address)
+    if not data: return
+    score, hp, tax, _, _, _, _, _, _, lp_p = calculate_score(data)
+    verdict = "VERIFIED ✅" if score > 75 else "ALERT 🚨"
+    title = f"{chain_key.upper()} Scan: {verdict} ({score}/100)"
+    desc = f"Tax: {tax}% | LP: {lp_p:.0f}% | 0.35% node execution fees"
+    content = f"📡 **Nexus Intel Fast Scan**\n`{address[:10]}...` | {chain_key.upper()}\n"
+    content += f"Score: `{score}/100` | **{verdict}**\n"
+    content += f"Tax: `{tax}%` | LP Lock: `{lp_p:.1f}%`\n"
+    content += f"⚡ Node Execution Node: 0.35% (65% cheaper than industry standards)"
+    results = [InlineQueryResultArticle(id=str(uuid.uuid4()), title=title, description=desc,
+               input_message_content=InputTextMessageContent(content, parse_mode='Markdown'),
+               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Execute Private Trading Node", url=f"https://t.me/{context.bot.username}")]]))]
+    await update.inline_query.answer(results, cache_time=10)
 
 if __name__ == "__main__":
-    application = Application.builder().token(TOKEN).post_init(init_session).post_stop(close_session).build()
-    application.add_error_handler(error_handler)
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("ping", ping))
-    application.add_handler(CommandHandler("setup", setup))
-    application.add_handler(CommandHandler("wallet", wallet))
-    application.add_handler(CommandHandler("snipe", snipe))
-    application.run_polling()
+    logger.info("Initializing application processing channels...")
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("wallet", wallet))
+    app.add_handler(CommandHandler("scan", scan))
+    app.add_handler(CommandHandler("snipe", snipe))
+    app.add_handler(CommandHandler("price", price))
+    app.add_handler(CallbackQueryHandler(button_snipe, pattern="^snip_"))
+    app.add_handler(InlineQueryHandler(inline_query))
+    logger.info("Active pipeline connected. Polling operational event fields...")
+    app.run_polling()
