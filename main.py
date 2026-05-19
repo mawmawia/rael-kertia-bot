@@ -5,6 +5,8 @@ import asyncio
 import uuid
 import httpx
 import sqlite3
+import traceback
+import re
 from cryptography.fernet import Fernet
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
@@ -33,9 +35,13 @@ except ValueError:
 if not all([TOKEN, ENCRYPTION_KEY, DEV_COLD_WALLET]):
     logger.critical("❌ Core environment variables missing from Railway config panel!"); sys.exit(1)
 
+try:
+    fernet = Fernet(ENCRYPTION_KEY.encode())
+except Exception as e:
+    logger.critical(f"❌ Invalid ENCRYPTION_KEY: {e}"); sys.exit(1)
+
 FEE_PERCENT = 0.0035
 REFERRAL_KICKBACK = 0.10
-fernet = Fernet(ENCRYPTION_KEY.encode())
 TOTAL_SCANS = 0
 
 # ===== THREAD-SAFE DATABASE SETUP =====
@@ -60,16 +66,21 @@ RPC_MAP = {
 
 # ===== CRYPTO WALLET LOGIC MANAGERS =====
 def get_wallet(user_id: int, referrer_id: int = 0):
-    with sqlite3.connect("wallets.db", timeout=10) as local_conn:
-        row = local_conn.execute("SELECT enc_key FROM wallets WHERE user_id=?", (user_id,)).fetchone()
-        if row:
-            return Web3().eth.account.from_key(fernet.decrypt(row[0].encode()))
-        acct = Web3().eth.account.create()
-        enc = fernet.encrypt(acct.key).decode()
-        local_conn.execute("INSERT INTO wallets (user_id, enc_key, referrer) VALUES (?,?,?)", (user_id, enc, referrer_id))
-        local_conn.execute("INSERT OR IGNORE INTO referrals (user_id, earned) VALUES (?, 0.0)", (user_id,))
-        local_conn.commit()
-        return acct
+    try:
+        with sqlite3.connect("wallets.db", timeout=10) as local_conn:
+            row = local_conn.execute("SELECT enc_key FROM wallets WHERE user_id=?", (user_id,)).fetchone()
+            if row:
+                decrypted_key = fernet.decrypt(row[0].encode())
+                return Web3().eth.account.from_key(decrypted_key)
+            acct = Web3().eth.account.create()
+            enc = fernet.encrypt(acct.key).decode()
+            local_conn.execute("INSERT INTO wallets (user_id, enc_key, referrer) VALUES (?,?,?)", (user_id, enc, referrer_id))
+            local_conn.execute("INSERT OR IGNORE INTO referrals (user_id, earned) VALUES (?, 0.0)", (user_id,))
+            local_conn.commit()
+            return acct
+    except Exception as e:
+        logger.error(f"get_wallet failed for {user_id}: {e}")
+        raise
 
 def get_referral_stats(user_id: int):
     with sqlite3.connect("wallets.db", timeout=10) as local_conn:
@@ -148,7 +159,7 @@ async def safe_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: s
         else:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
     except Exception as e:
-        logger.error(f"safe_reply failed: {e}")
+        logger.error(f"safe_reply failed: {e}\n{traceback.format_exc()}")
         try:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
         except Exception as final_e:
@@ -156,78 +167,98 @@ async def safe_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: s
 
 # ===== USER FACE COMMAND HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    ref_id = 0
-    if context.args and context.args[0].isdigit():
-        ref_id = int(context.args[0])
-        if ref_id == user_id: ref_id = 0
+    try:
+        user_id = update.effective_user.id
+        ref_id = 0
+        if context.args and context.args[0].isdigit():
+            ref_id = int(context.args[0])
+            if ref_id == user_id: ref_id = 0
 
-    get_wallet(user_id, ref_id)
-    msg = "⚔️ **RAEL_KERTIA BOT v3.2 | LIVE**\n\n"
-    msg += "0.35% Fees | Secure Encrypted User Wallets | 10% Referral Kickback\n\n"
-    msg += "Commands:\n"
-    msg += "/trade - Interactive trading dashboard 📊\n"
-    msg += "/wallet - View your private deposit address & balance\n"
-    msg += "/referral - Access your partner network statistics\n"
-    msg += "/scan [chain] [address] - Audit smart contract safety matrix\n"
-    msg += "/snipe [chain] [address] [amount_eth] - Execute token orders\n"
-    msg += "/price [chain] [address] - Live market analytical feed\n"
-    msg += "/myid - System identity configuration checker"
-    await safe_reply(update, context, msg, parse_mode="Markdown")
+        get_wallet(user_id, ref_id)
+        msg = "⚔️ **RAEL_KERTIA BOT v3.2 | LIVE**\n\n"
+        msg += "0.35% Fees | Secure Encrypted User Wallets | 10% Referral Kickback\n\n"
+        msg += "Commands:\n"
+        msg += "/trade - Interactive trading dashboard 📊\n"
+        msg += "/wallet - View your private deposit address & balance\n"
+        msg += "/referral - Access your partner network statistics\n"
+        msg += "/scan [chain] [address] - Audit smart contract safety matrix\n"
+        msg += "/snipe [chain] [address] [amount_eth] - Execute token orders\n"
+        msg += "/price [chain] [address] - Live market analytical feed\n"
+        msg += "/myid - System identity configuration checker"
+        await safe_reply(update, context, msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"start failed: {e}\n{traceback.format_exc()}")
+        await safe_reply(update, context, f"❌ Start command failed: {str(e)[:100]}")
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    w = get_wallet(user_id)
-    msg = f"📥 **Your Dedicated Rael_Kertia Deposit Address:**\n\n"
-    msg += f"`{w.address}`\n\n"
-    msg += "⚠️ Gas and platform service fees (0.35%) are auto-deducted per trade execution."
-    await safe_reply(update, context, msg, parse_mode="Markdown")
+    try:
+        user_id = update.effective_user.id
+        w = get_wallet(user_id)
+        msg = f"📥 **Your Dedicated Rael_Kertia Deposit Address:**\n\n"
+        msg += f"`{w.address}`\n\n"
+        msg += "⚠️ Gas and platform service fees (0.35%) are auto-deducted per trade execution."
+        await safe_reply(update, context, msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"wallet failed: {e}\n{traceback.format_exc()}")
+        await safe_reply(update, context, f"❌ Wallet error: `Invalid ENCRYPTION_KEY or corrupted database`. Delete `wallets.db` and restart.\n\nError: {str(e)[:100]}", parse_mode="Markdown")
 
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    count, earned = get_referral_stats(user_id)
-    link = f"https://t.me/{context.bot.username}?start={user_id}"
-    msg = "🎯 **Your Real-Time Referral Statistics**\n\n"
-    msg += f"Your Share Link:\n`{link}`\n\n"
-    msg += f"• Registered Network Referrals: `{count} Users`\n"
-    msg += f"• Total Earned Dividend Income: `{earned:.6f} ETH`\n\n"
-    msg += "_System distributes exactly 10% of generated platform commissions straight to your partner index._"
-    await safe_reply(update, context, msg, parse_mode='Markdown')
+    try:
+        user_id = update.effective_user.id
+        count, earned = get_referral_stats(user_id)
+        link = f"https://t.me/{context.bot.username}?start={user_id}"
+        msg = "🎯 **Your Real-Time Referral Statistics**\n\n"
+        msg += f"Your Share Link:\n`{link}`\n\n"
+        msg += f"• Registered Network Referrals: `{count} Users`\n"
+        msg += f"• Total Earned Dividend Income: `{earned:.6f} ETH`\n\n"
+        msg += "_System distributes exactly 10% of generated platform commissions straight to your partner index._"
+        await safe_reply(update, context, msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"referral failed: {e}\n{traceback.format_exc()}")
+        await safe_reply(update, context, f"❌ Referral error: {str(e)[:100]}")
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    current_env = os.environ.get('OWNER_ID', 'NOT SET')
+    try:
+        user_id = update.effective_user.id
+        current_env = os.environ.get('OWNER_ID', 'NOT SET')
 
-    msg = f"🔍 **Rael_Kertia Diagnostic Panel**\n\n"
-    msg += f"• Your Active Telegram ID: `{user_id}`\n"
-    msg += f"• Memory Loaded Owner ID: `{OWNER_ID}`\n"
-    msg += f"• Raw Railway Environment Var: {current_env}\n\n"
+        msg = f"🔍 **Rael_Kertia Diagnostic Panel**\n\n"
+        msg += f"• Your Active Telegram ID: `{user_id}`\n"
+        msg += f"• Memory Loaded Owner ID: `{OWNER_ID}`\n"
+        msg += f"• Raw Railway Environment Var: {current_env}\n\n"
 
-    if str(user_id) == str(current_env).strip():
-        msg += "✅ **Match Status:** Verified. System honors Owner privileges."
-    else:
-        msg += "❌ **Match Status:** Mismatched. Check your Railway dashboard parameters."
-    await safe_reply(update, context, msg, parse_mode='Markdown')
+        if str(user_id) == str(current_env).strip():
+            msg += "✅ **Match Status:** Verified. System honors Owner privileges."
+        else:
+            msg += "❌ **Match Status:** Mismatched. Check your Railway dashboard parameters."
+        await safe_reply(update, context, msg, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"myid failed: {e}\n{traceback.format_exc()}")
+        await safe_reply(update, context, f"❌ MyID error: {str(e)[:100]}")
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    w = get_wallet(user_id)
+    try:
+        user_id = update.effective_user.id
+        w = get_wallet(user_id)
 
-    msg = "⚡ **RAEL_KERTIA TRADE DASHBOARD**\n\n"
-    msg += f"Wallet: `{w.address[:6]}...{w.address[-4:]}`\n\n"
-    msg += "**Quick Actions:**\n"
-    msg += "• `/snipe [chain] [token] [amount]` - Buy tokens\n"
-    msg += "• `/scan [chain] [token]` - Audit before trading\n"
-    msg += "• `/price [chain] [token]` - Check live price\n\n"
-    msg += "_Fund your wallet via /wallet to begin trading._\n"
-    msg += "_0.35% platform fee applies per execution._"
+        msg = "⚡ **RAEL_KERTIA TRADE DASHBOARD**\n\n"
+        msg += f"Wallet: `{w.address[:6]}...{w.address[-4:]}`\n\n"
+        msg += "**Quick Actions:**\n"
+        msg += "• `/snipe [chain] [token] [amount]` - Buy tokens\n"
+        msg += "• `/scan [chain] [token]` - Audit before trading\n"
+        msg += "• `/price [chain] [token]` - Check live price\n\n"
+        msg += "_Fund your wallet via /wallet to begin trading._\n"
+        msg += "_0.35% platform fee applies per execution._"
 
-    buttons = [
-        [InlineKeyboardButton("📊 Scan Token", switch_inline_query_current_chat="base ")],
-        [InlineKeyboardButton("💰 View Wallet", callback_data="wallet")],
-        [InlineKeyboardButton("🎯 Referral Stats", callback_data="referral")]
-    ]
-    await safe_reply(update, context, msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+        buttons = [
+            [InlineKeyboardButton("📊 Scan Token", switch_inline_query_current_chat="base ")],
+            [InlineKeyboardButton("💰 View Wallet", callback_data="wallet")],
+            [InlineKeyboardButton("🎯 Referral Stats", callback_data="referral")]
+        ]
+        await safe_reply(update, context, msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"trade failed: {e}\n{traceback.format_exc()}")
+        await safe_reply(update, context, f"❌ Trade dashboard error: {str(e)[:100]}")
 
 # ===== CALLBACK INTERFACE ROUTER =====
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,15 +273,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_SCANS
 
-    raw_args = update.message.text.split()[1:]
+    # Clean text input from arbitrary mobile spacing/newlines
+    clean_text = re.sub(r'\s+', ' ', update.message.text.strip())
+    raw_args = clean_text.split()[1:]
+    
     if len(raw_args) < 2:
         await safe_reply(update, context, "❌ Usage: `/scan base 0x1234...`", parse_mode='Markdown')
         return
 
     chain_key = raw_args[0].lower()
-    token_addr = ''.join(raw_args[1:]).replace('\n', '').replace(' ', '').strip()
+    token_addr = raw_args[1].strip()
 
-    if len(token_addr)!= 42 or not token_addr.startswith("0x"):
+    if len(token_addr) != 42 or not token_addr.startswith("0x"):
         await safe_reply(update, context, f"❌ Invalid address format. Got {len(token_addr)} chars: `{token_addr[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
         return
 
@@ -351,20 +385,23 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if update.message.chat.type!= 'private':
+    if update.message.chat.type != 'private':
         await safe_reply(update, context, "Trading triggers locked to private conversations to prevent group exploitation.")
         return
 
-    raw_args = update.message.text.split()[1:]
+    # Clean text input from arbitrary mobile spacing/newlines
+    clean_text = re.sub(r'\s+', ' ', update.message.text.strip())
+    raw_args = clean_text.split()[1:]
+    
     if len(raw_args) < 3:
         await safe_reply(update, context, "❌ Usage: `/snipe base 0x... 0.01`", parse_mode='Markdown')
         return
 
     chain_key = raw_args[0].lower()
-    token = ''.join(raw_args[1:-1]).replace('\n', '').replace(' ', '').strip()
-    amount_str = raw_args[-1].strip()
+    token = raw_args[1].strip()
+    amount_str = raw_args[2].strip()
 
-    if len(token)!= 42 or not token.startswith("0x"):
+    if len(token) != 42 or not token.startswith("0x"):
         await safe_reply(update, context, f"❌ Invalid address format. Got {len(token)} chars: `{token[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
         return
 
@@ -383,7 +420,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rpc_url = RPC_MAP[chain_id]
 
     # ===== OWNER BYPASS SYSTEM GATE =====
-    if user_id == OWNER_ID and OWNER_ID!= 0:
+    if user_id == OWNER_ID and OWNER_ID != 0:
         msg = f"🎯 **OWNER EXECUTION GATE**\n"
         msg += f"Simulating on-chain {amount} ETH acquisition on {chain_key.upper()}\n"
         msg += f"Balance Verification: BYPASSED\n\n"
@@ -440,7 +477,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip().split()
     if len(query) < 2: return
     chain_key, address = query[0].lower(), query[1].strip()
-    if len(address)!= 42 or not address.startswith("0x"): return
+    if len(address) != 42 or not address.startswith("0x"): return
     if chain_key not in CHAINS: return
 
     chain_id = CHAINS[chain_key]
