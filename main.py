@@ -7,7 +7,7 @@ import httpx
 import sqlite3
 from cryptography.fernet import Fernet
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler
 from web3 import Web3
 
 # ===== LOGGING =====
@@ -33,7 +33,7 @@ TOTAL_SCANS = 0
 def init_db():
     with sqlite3.connect("wallets.db") as local_conn:
         local_conn.execute("CREATE TABLE IF NOT EXISTS wallets (user_id INTEGER PRIMARY KEY, enc_key TEXT, referrer INTEGER DEFAULT 0)")
-        local_conn.execute("CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER, earned REAL DEFAULT 0)")
+        local_conn.execute("CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER PRIMARY KEY, earned REAL DEFAULT 0.0)")
         local_conn.commit()
 
 init_db()
@@ -48,7 +48,7 @@ RPC_MAP = {
     "42161": "https://arb1.arbitrum.io/rpc"
 }
 
-# ===== WALLET UTILS (Thread-Safe Context) =====
+# ===== WALLET UTILS =====
 def get_wallet(user_id: int, referrer_id: int = 0):
     with sqlite3.connect("wallets.db") as local_conn:
         row = local_conn.execute("SELECT enc_key FROM wallets WHERE user_id=?", (user_id,)).fetchone()
@@ -57,7 +57,7 @@ def get_wallet(user_id: int, referrer_id: int = 0):
         acct = Web3().eth.account.create()
         enc = fernet.encrypt(acct.key).decode()
         local_conn.execute("INSERT INTO wallets (user_id, enc_key, referrer) VALUES (?,?,?)", (user_id, enc, referrer_id))
-        local_conn.execute("INSERT OR IGNORE INTO referrals (user_id) VALUES (?)", (user_id,))
+        local_conn.execute("INSERT OR IGNORE INTO referrals (user_id, earned) VALUES (?, 0.0)", (user_id,))
         local_conn.commit()
         return acct
 
@@ -113,7 +113,7 @@ async def get_dexscreener_data(dex_chain, token):
 
 def calculate_score(data):
     score = 100
-    if not data: return 0, True, 0, True, True, False, False, True, False, False, False, 0
+    if not data: return 0, True, 0, 0, True, True, False, False, True, False, False, 0
     honeypot = data.get("is_honeypot") == "1"
     buy_tax = float(data.get("buy_tax", 0))
     sell_tax = float(data.get("sell_tax", 0))
@@ -210,7 +210,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token_addr = context.args[1] if len(context.args) > 1 else context.args[0]
     chain_id = CHAINS.get(chain_key, "1")
     dex_chain = DEX_CHAIN_MAP.get(chain_id, "ethereum")
-    status_msg = await update.message.reply_text("⚡ `Rael_kertia: Parsing data...`", parse_mode='Markdown')
+    status_msg = await update.message.reply_text("⚡ `Rael_Kertia: Parsing data...`", parse_mode='Markdown')
     TOTAL_SCANS += 1
     data, dex = await asyncio.gather(get_token_data(chain_id, token_addr), get_dexscreener_data(dex_chain, token_addr))
     if not data:
@@ -254,7 +254,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if update.message.chat.type!= 'private':
+    if update.message.chat.type != 'private':
         await update.message.reply_text("Execution locked to DM. Groups are scan-only.")
         return
     if len(context.args) < 3:
@@ -269,36 +269,50 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chain_id = CHAINS[chain_key]
     w = get_wallet(user_id)
     rpc_url = RPC_MAP[chain_id]
-    
+
+    # ===== OWNER BYPASS - SKIPS ALL CHECKS =====
+    if user_id == OWNER_ID:
+        msg = f"🎯 **OWNER TEST MODE - FREE PASS**\n"
+        msg += f"Simulating {amount} ETH on {chain_key.upper()}\n"
+        msg += f"Fee: 0.00 ETH | Balance Check: SKIPPED\n"
+        msg += f"⏳ Routing network tokens..."
+        status = await update.message.reply_text(msg, parse_mode='Markdown')
+        await asyncio.sleep(1)
+        await status.edit_text(f"✅ **OWNER TEST COMPLETE**\n"
+                               f"Chain: {chain_key.upper()}\n"
+                               f"Simulated Value: {amount:.6f} ETH\n"
+                               f"Engine Fee: 0.00 ETH\n\n"
+                               f"⚡ Dry-run successful. No on-chain tx sent.\n"
+                               f"_Core pipeline validated. Inject DEX router for live swaps._", parse_mode='Markdown')
+        return
+
+    # ===== NORMAL USER FLOW =====
+    status = await update.message.reply_text("⏳ `Checking ledger balances securely...`", parse_mode='Markdown')
     try:
         balance_eth = await asyncio.to_thread(fetch_blockchain_balance, rpc_url, w.address)
         if balance_eth < amount:
-            await update.message.reply_text(f"❌ Aborted: Balance too low ({balance_eth:.5f} ETH). Use /wallet to deposit.")
+            await status.edit_text(f"❌ Aborted: Balance too low ({balance_eth:.5f} ETH). Use /wallet to deposit.")
             return
     except Exception as e:
-        await update.message.reply_text(f"❌ RPC Connection Error: {str(e)[:50]}")
+        await status.edit_text(f"❌ RPC Connection Error: {str(e)[:50]}")
         return
 
-    if user_id == OWNER_ID:
-        fee = 0.0; swap_amount = amount
-        msg = f"🎯 **OWNER TEST MODE**\nExecuting {amount} ETH on {chain_key.upper()}...\nFee: 0.00 ETH\n"
-    else:
-        fee = amount * FEE_PERCENT; swap_amount = amount - fee
-        msg = f"🎯 **Executing {amount} ETH on {chain_key.upper()}**\nFee: {fee:.6f} ETH (0.35%)\nSwap routing weight: {swap_amount:.6f} ETH\n"
-    
-    status = await update.message.reply_text(msg + "⏳ Routing network tokens...", parse_mode='Markdown')
+    fee = amount * FEE_PERCENT; swap_amount = amount - fee
+    msg = f"🎯 **Executing {amount} ETH on {chain_key.upper()}**\nFee: {fee:.6f} ETH (0.35%)\nSwap routing weight: {swap_amount:.6f} ETH\n"
+    await status.edit_text(msg + "⏳ Routing network tokens...", parse_mode='Markdown')
     
     try:
         if fee > 0:
             value_wei = Web3().to_wei(fee, 'ether')
             fee_hash = await asyncio.to_thread(broadcast_fee_transaction, rpc_url, DEV_COLD_WALLET, value_wei, w.key, chain_id)
             
-            # Handle referral kickback
             with sqlite3.connect("wallets.db") as local_conn:
-                ref_id = local_conn.execute("SELECT referrer FROM wallets WHERE user_id=?", (user_id,)).fetchone()[0]
-                if ref_id > 0:
+                ref_row = local_conn.execute("SELECT referrer FROM wallets WHERE user_id=?", (user_id,)).fetchone()
+                if ref_row and ref_row[0] > 0:
+                    ref_id = ref_row[0]
                     kickback = fee * REFERRAL_KICKBACK
-                    local_conn.execute("UPDATE referrals SET earned = earned +? WHERE user_id=?", (kickback, ref_id))
+                    local_conn.execute("INSERT OR IGNORE INTO referrals (user_id, earned) VALUES (?, 0.0)", (ref_id,))
+                    local_conn.execute("UPDATE referrals SET earned = earned + ? WHERE user_id=?", (kickback, ref_id))
                     local_conn.commit()
             
             logger.info(f"Platform fee extracted: {fee_hash}")
@@ -338,7 +352,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     verdict = "VERIFIED ✅" if score > 75 else "ALERT 🚨"
     title = f"{chain_key.upper()} Scan: {verdict} ({score}/100)"
     desc = f"Tax: {buy_tax+sell_tax}% | LP: {lp_p:.0f}% | 0.35% fees"
-    content = f"⚔️ **Rael_kertia Fast Scan**\n`{address[:10]}...` | {chain_key.upper()}\n"
+    content = f"⚔️ **Rael_Kertia Fast Scan**\n`{address[:10]}...` | {chain_key.upper()}\n"
     content += f"Score: `{score}/100` | **{verdict}**\n"
     content += f"Tax: `{buy_tax+sell_tax}%` | LP Lock: `{lp_p:.1f}%`\n"
     content += f"⚡ Execution: 0.35% (65% cheaper than industry standards)"
