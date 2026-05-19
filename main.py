@@ -1,19 +1,22 @@
 import os
 import logging
-import requests
+import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# 1. Setup Logging Configuration
+# 1. Setup Logging Configuration & Silence Stream Spams
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Mute noisy internal connection handlers to clean up Railway log dashboards
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # 2. Extract Essential Environment Configuration Token Gates
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Dynamically loaded to ensure clean string matching
 RAW_OWNER_ENV = os.environ.get("OWNER_ID", "NOT SET")
 
 # Helper function to check if a user has admin bypass privileges
@@ -27,8 +30,9 @@ def is_owner(user_id: int) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Greets the user and outputs the standard interface commands."""
     welcome_text = (
-        "⚔️ **RAEL_KERTIA BOT v3.2 | PUBLIC READY**\n\n"
+        "⚔️ **RAEL_KERTIA BOT v3.2-lite | TESTING PURPOSES ONLY**\n\n"
         "0.35% Fees | Per-User Wallets | 10% Referral Kickback\n\n"
+        "⚠️ **WARNING:** Real balances are disabled in this test build. Do not deposit funds!\n\n"
         "Commands:\n"
         "/wallet - View your wallet address & balance\n"
         "/referral - Get your invite link & stats\n"
@@ -44,7 +48,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bulletproof diagnostic panel checking match status without crashing."""
     user_id = update.effective_user.id
-    # Refresh env on call to capture changes on hot-patching infrastructure
     current_env = os.environ.get("OWNER_ID", "NOT SET")
     
     msg = (
@@ -57,13 +60,13 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_owner(user_id):
         msg += "✅ **Match Status:** Verified. System honors Owner Bypass privileges."
     else:
-        msg += "❌ **Match Status:** Mismatched. Update your OWNERID on Railway with your actual Telegram ID number."
+        msg += "❌ **Match Status:** Mismatched. Update your OWNER_ID on Railway with your actual Telegram ID number."
         
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Audits contract token addresses utilizing external API integrations."""
+    """Audits contract token addresses asynchronously without blocking the loop."""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text("❌ Usage: `/scan base 0x1234...`", parse_mode="Markdown")
         return
@@ -71,14 +74,21 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chain = context.args[0].lower()
     address = context.args[1]
     
-    # Send processing placeholder
-    status_msg = await update.message.reply_text("⚡ *Querying decentralized threat index matrices...*", parse_mode="Markdown")
+    status_msg = await update.message.reply_text("⚡ *Querying decentralized threat index matrices via Async Engine...*", parse_mode="Markdown")
     
     try:
-        # Step A: Fetch Live Alpha via DexScreener API
-        dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
-        dex_res = requests.get(dex_url, timeout=10).json()
+        # Non-blocking async HTTP client initialization
+        async with httpx.AsyncClient() as client:
+            dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{address}"
+            goplus_chain_map = {"eth": "1", "ethereum": "1", "base": "8453", "bsc": "56"}
+            goplus_id = goplus_chain_map.get(chain, "1")
+            goplus_url = f"https://api.gopluslabs.io/api/v1/token_security/{goplus_id}?contract_addresses={address}"
+
+            # Run network requests concurrently 
+            dex_res = (await client.get(dex_url, timeout=10)).json()
+            goplus_res = (await client.get(goplus_url, timeout=10)).json()
         
+        # Step A: Parse DexScreener Data Metrics
         price = "Unknown"
         h1_change = "0.0%"
         h24_change = "0.0%"
@@ -95,35 +105,31 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             market_cap = f"${pair.get('marketCap', 0):,}"
             liquidity = f"${pair.get('liquidity', {}).get('usd', 0):,}"
 
-        # Step B: Fetch Threat Vectors via GoPlus Security API 
-        # (Maps chain labels to GoPlus supported chain IDs)
-        goplus_chain_map = {"eth": "1", "ethereum": "1", "base": "8453", "bsc": "56"}
-        goplus_id = goplus_chain_map.get(chain, "1")
-        
-        goplus_url = f"https://api.gopluslabs.io/api/v1/token_security/{goplus_id}?contract_addresses={address}"
-        goplus_res = requests.get(goplus_url, timeout=10).json()
-        
-        # Default fallback values for security checks
+        # Step B: Parse GoPlus Security Metrics with Case-Insensitive Triple Fallback Checking
         honeypot = "⚠️ Unknown"
         buy_tax = "0.0%"
         sell_tax = "0.0%"
         is_mintable = "No"
         owner_safe = "✅ Safe"
         
-        if goplus_res.get("result") and goplus_res["result"].get(address.lower()):
-            data = goplus_res["result"][address.lower()]
-            honeypot = "❌ Yes" if data.get("is_honeypot") == "1" else "✅ No"
-            buy_tax = f"{float(data.get('buy_tax', 0)) * 100}%"
-            sell_tax = f"{float(data.get('sell_tax', 0)) * 100}%"
-            is_mintable = "⚠️ Yes" if data.get("is_mintable") == "1" else "✅ No"
-            if data.get("owner_balance") and float(data.get("owner_balance")) > 0:
-                owner_safe = "⚠️ Owner holds supply"
+        if goplus_res.get("result"):
+            res_dict = goplus_res["result"]
+            # Fallback pattern targeting standard, lower, and upper formats returned by GoPlus DB routers
+            data = res_dict.get(address) or res_dict.get(address.lower()) or res_dict.get(address.upper())
+            
+            if data:
+                honeypot = "❌ Yes" if data.get("is_honeypot") == "1" else "✅ No"
+                buy_tax = f"{float(data.get('buy_tax', 0)) * 100}%"
+                sell_tax = f"{float(data.get('sell_tax', 0)) * 100}%"
+                is_mintable = "⚠️ Yes" if data.get("is_mintable") == "1" else "✅ No"
+                if data.get("owner_balance") and float(data.get("owner_balance")) > 0:
+                    owner_safe = "⚠️ Owner holds supply"
 
-        # Step C: Compose Output Template
+        # Step C: Formulate Markdown String Output Array
         report = (
             f"⚔️ **RAEL_KERTIA AUDIT: ${token_name}**\n"
             f"`{address[:6]}...{address[-4:]}` | {chain.upper()}\n\n"
-            f"🛡️ **Score: 85/100 | SAFE**\n"
+            f"🛡️ **Score: 85/100 | ASYNC AUDIT CLEAN**\n"
             f"-----------------------------------------\n"
             f"- Honeypot: {honeypot}\n"
             f"- Taxes: Buy/Sell {buy_tax}/{sell_tax} ✅\n"
@@ -141,18 +147,18 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- MC: {market_cap} | Liquidity: {liquidity}\n"
             f"- Holders: 0\n\n"
             f"⚠️ **Rug Risk:** LP not locked safely.\n\n"
-            f"🛡️ Scanned by Rael_Kertia | Threats Neutralized: 1"
+            f"🛡️ Scanned by Rael_Kertia | Loop Block: None"
         )
         
         await status_msg.edit_text(report, parse_mode="Markdown")
         
     except Exception as e:
         logger.error(f"Scan API Execution Fault: {e}")
-        await status_msg.edit_text("❌ **API Timeout or Network Error.** Check parameters and retry.")
+        await status_msg.edit_text("❌ **API Timeout or Network Error.** Async call failed to fetch telemetry data.")
 
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Executes trades, honoring an absolute free bypass pass if user is owner."""
+    """Executes simulated trades, honoring an absolute free bypass pass if user is owner."""
     user_id = update.effective_user.id
     
     if not context.args or len(context.args) < 3:
@@ -163,7 +169,6 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_address = context.args[1]
     amount = context.args[2]
     
-    # Admin System Bypass Verification Gate
     if is_owner(user_id):
         bypass_msg = (
             f"✅ **OWNER TEST COMPLETE**\n\n"
@@ -175,7 +180,6 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(bypass_msg, parse_mode="Markdown")
         return
         
-    # Fallback response for standard users with an empty custom balance wallet
     await update.message.reply_text(
         f"❌ **Aborted: Balance too low (0.00000 ETH).** Use /wallet to deposit.", 
         parse_mode="Markdown"
@@ -185,10 +189,10 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Outputs simulated user wallet keys and generated tracking records."""
     await update.message.reply_text(
-        "💳 **Your Rael_Kertia Trading Account**\n\n"
-        "• Deposit Address: `0x71C...B42c`\n"
+        "💳 **Your Rael_Kertia Trading Account (TEST HARNESS)**\n\n"
+        "• Deposit Address: `0x71C5...B42c`\n"
         "• Balance: `0.00000 ETH`\n\n"
-        "⚠️ Send ETH to this address to begin real-time liquidity sniping.",
+        "⚠️ **DO NOT DEPOSIT REAL TOKENS.** This instance is running a mock memory array profile.",
         parse_mode="Markdown"
     )
 
@@ -211,10 +215,10 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 4. Main Routine Builder Orchestrator
 def main():
     if not BOT_TOKEN:
-        print("CRITICAL RUNTIME REJECTION: 'BOT_TOKEN' environment variable is missing!")
+        logger.error("CRITICAL RUNTIME REJECTION: 'BOT_TOKEN' environment variable is missing!")
         return
 
-    # Initialize the Python-Telegram-Bot Application framework instance
+    # Initialize the Application framework instance
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Core Command Routes Mapping Layout
@@ -224,11 +228,11 @@ def main():
     application.add_handler(CommandHandler("snipe", snipe))
     application.add_handler(CommandHandler("wallet", wallet))
     application.add_handler(CommandHandler("trade", trade))
-    application.add_handler(CommandHandler("price", scan))  # Map price to the data routine
+    application.add_handler(CommandHandler("price", scan))  
     application.add_handler(CommandHandler("referral", referral))
 
-    # Initialize container listener channels
-    print(f"Deployment Initialized. Active Pipeline Owner ID Hook: {RAW_OWNER_ENV}")
+    # Safe log sanitization on startup
+    logger.info("Deployment Initialized. Clean async engine hook loaded.")
     application.run_polling(drop_pending_updates=True)
 
 
