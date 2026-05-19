@@ -110,7 +110,6 @@ def calculate_score(data):
     if hidden_tax: score -= 20
     if anti_whale: score -= 10
     if whale_concentration: score -= 15
-    # FIXED: honeypot returned cleanly without name mismatch
     return max(0, score), honeypot, buy_tax, sell_tax, owner_control, mintable, hidden_tax, anti_whale, cooldown, lp_locked, whale_concentration, total_lp_locked
 
 def fetch_blockchain_balance(rpc_url, address):
@@ -137,6 +136,24 @@ def broadcast_fee_transaction(rpc_url, to_address, value_wei, private_key, chain
     signed = account.sign_transaction(tx)
     return w3.eth.send_raw_transaction(signed.rawTransaction).hex()
 
+# ===== UNIVERSAL RESPONSE HANDLER - BULLETPROOF =====
+async def safe_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
+    """Handles both text commands and button clicks. Never fails silently."""
+    try:
+        if update.callback_query:
+            await update.callback_query.answer()
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
+        elif update.message:
+            await update.message.reply_text(text, **kwargs)
+        else:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
+    except Exception as e:
+        logger.error(f"safe_reply failed: {e}")
+        try:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
+        except Exception as final_e:
+            logger.critical(f"Context breakdown entirely: {final_e}")
+
 # ===== USER FACE COMMAND HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -156,7 +173,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "/snipe [chain] [address] [amount_eth] - Execute token orders\n"
     msg += "/price [chain] [address] - Live market analytical feed\n"
     msg += "/myid - System identity configuration checker"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await safe_reply(update, context, msg, parse_mode="Markdown")
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -164,11 +181,7 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"📥 **Your Dedicated Rael_Kertia Deposit Address:**\n\n"
     msg += f"`{w.address}`\n\n"
     msg += "⚠️ Gas and platform service fees (0.35%) are auto-deducted per trade execution."
-
-    if update.callback_query:
-        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(msg, parse_mode="Markdown")
+    await safe_reply(update, context, msg, parse_mode="Markdown")
 
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -179,11 +192,7 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"• Registered Network Referrals: `{count} Users`\n"
     msg += f"• Total Earned Dividend Income: `{earned:.6f} ETH`\n\n"
     msg += "_System distributes exactly 10% of generated platform commissions straight to your partner index._"
-
-    if update.callback_query:
-        await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(msg, parse_mode='Markdown')
+    await safe_reply(update, context, msg, parse_mode='Markdown')
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -198,11 +207,7 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "✅ **Match Status:** Verified. System honors Owner privileges."
     else:
         msg += "❌ **Match Status:** Mismatched. Check your Railway dashboard parameters."
-
-    if update.message:
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
+    await safe_reply(update, context, msg, parse_mode='Markdown')
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -222,7 +227,7 @@ async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💰 View Wallet", callback_data="wallet")],
         [InlineKeyboardButton("🎯 Referral Stats", callback_data="referral")]
     ]
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+    await safe_reply(update, context, msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
 
 # ===== CALLBACK INTERFACE ROUTER =====
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,24 +244,23 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw_args = update.message.text.split()[1:]
     if len(raw_args) < 2:
-        await update.message.reply_text("❌ Usage: `/scan base 0x1234...`", parse_mode='Markdown')
+        await safe_reply(update, context, "❌ Usage: `/scan base 0x1234...`", parse_mode='Markdown')
         return
 
     chain_key = raw_args[0].lower()
-    # FIXED: Robust full slice join safely handles wrapped mobile layout fragments
     token_addr = ''.join(raw_args[1:]).replace('\n', '').replace(' ', '').strip()
 
-    if len(token_addr) != 42 or not token_addr.startswith("0x"):
-        await update.message.reply_text(f"❌ Invalid address format. Got {len(token_addr)} chars: `{token_addr[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
+    if len(token_addr)!= 42 or not token_addr.startswith("0x"):
+        await safe_reply(update, context, f"❌ Invalid address format. Got {len(token_addr)} chars: `{token_addr[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
         return
 
     if chain_key not in CHAINS:
-        await update.message.reply_text("❌ Supported chains: eth, base, bsc, arb.", parse_mode="Markdown")
+        await safe_reply(update, context, "❌ Supported chains: eth, base, bsc, arb.", parse_mode="Markdown")
         return
 
     chain_id = CHAINS[chain_key]
     dex_chain = DEX_CHAIN_MAP[chain_id]
-    status_msg = await update.message.reply_text("⚡ `Rael_Kertia: Auditing multi-stream analytics...`", parse_mode='Markdown')
+    status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⚡ `Rael_Kertia: Auditing multi-stream analytics...`", parse_mode='Markdown')
     TOTAL_SCANS += 1
 
     dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{token_addr}"
@@ -347,31 +351,31 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if update.message.chat.type != 'private':
-        await update.message.reply_text("Trading triggers locked to private conversations to prevent group exploitation.")
+    if update.message.chat.type!= 'private':
+        await safe_reply(update, context, "Trading triggers locked to private conversations to prevent group exploitation.")
         return
 
     raw_args = update.message.text.split()[1:]
     if len(raw_args) < 3:
-        await update.message.reply_text("❌ Usage: `/snipe base 0x... 0.01`", parse_mode='Markdown')
+        await safe_reply(update, context, "❌ Usage: `/snipe base 0x... 0.01`", parse_mode='Markdown')
         return
 
     chain_key = raw_args[0].lower()
     token = ''.join(raw_args[1:-1]).replace('\n', '').replace(' ', '').strip()
     amount_str = raw_args[-1].strip()
 
-    if len(token) != 42 or not token.startswith("0x"):
-        await update.message.reply_text(f"❌ Invalid address format. Got {len(token)} chars: `{token[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
+    if len(token)!= 42 or not token.startswith("0x"):
+        await safe_reply(update, context, f"❌ Invalid address format. Got {len(token)} chars: `{token[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
         return
 
     try:
         amount = float(amount_str)
     except ValueError:
-        await update.message.reply_text("❌ Amount must be a standard float value.")
+        await safe_reply(update, context, "❌ Amount must be a standard float value.")
         return
 
     if chain_key not in CHAINS:
-        await update.message.reply_text("❌ Supported chains: eth, base, bsc, arb.")
+        await safe_reply(update, context, "❌ Supported chains: eth, base, bsc, arb.")
         return
 
     chain_id = CHAINS[chain_key]
@@ -379,12 +383,12 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rpc_url = RPC_MAP[chain_id]
 
     # ===== OWNER BYPASS SYSTEM GATE =====
-    if user_id == OWNER_ID and OWNER_ID != 0:
+    if user_id == OWNER_ID and OWNER_ID!= 0:
         msg = f"🎯 **OWNER EXECUTION GATE**\n"
         msg += f"Simulating on-chain {amount} ETH acquisition on {chain_key.upper()}\n"
         msg += f"Balance Verification: BYPASSED\n\n"
         msg += f"⚡ Routing network pipeline..."
-        status = await update.message.reply_text(msg, parse_mode='Markdown')
+        status = await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
         await asyncio.sleep(1)
         await status.edit_text(f"✅ **OWNER EXECUTION COMPLETE**\n\n"
                                f"Chain Router: {chain_key.upper()}\n"
@@ -394,7 +398,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ===== PRODUCTION USER EXCHANGE PROCESSING PIPELINE =====
-    status = await update.message.reply_text("⏳ `Checking wallet balance...`", parse_mode='Markdown')
+    status = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ `Checking wallet balance...`", parse_mode='Markdown')
     try:
         balance_eth = await asyncio.to_thread(fetch_blockchain_balance, rpc_url, w.address)
         if balance_eth < amount:
@@ -419,7 +423,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ref_id = ref_row[0]
                     kickback = fee * REFERRAL_KICKBACK
                     local_conn.execute("INSERT OR IGNORE INTO referrals (user_id, earned) VALUES (?, 0.0)", (ref_id,))
-                    local_conn.execute("UPDATE referrals SET earned = earned + ? WHERE user_id=?", (kickback, ref_id))
+                    local_conn.execute("UPDATE referrals SET earned = earned +? WHERE user_id=?", (kickback, ref_id))
                     local_conn.commit()
 
             logger.info(f"Fee settlement complete: {fee_hash}")
@@ -436,7 +440,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip().split()
     if len(query) < 2: return
     chain_key, address = query[0].lower(), query[1].strip()
-    if len(address) != 42 or not address.startswith("0x"): return
+    if len(address)!= 42 or not address.startswith("0x"): return
     if chain_key not in CHAINS: return
 
     chain_id = CHAINS[chain_key]
