@@ -22,12 +22,18 @@ from solana.rpc.commitment import Processed
 from solana.rpc.types import TxOpts
 from solders.pubkey import Pubkey
 
-# --- LOGGING SETUP ---
+# --- 1. INITIALIZE ROOT LOGGER FIRST ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# --- 2. HARD-MUTE THIRD-PARTY LOGGERS TO PREVENT URL/TOKEN LEAKS ---
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 
 # --- SECURE ENVIRONMENT CONFIGURATION & FAIL-SAFES ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -138,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
 
     msg = (
-        "⚔️ **WELCOME TO RAEL_KERTIA ENGINE v3.4.1** ⚔️\n\n"
+        "⚔️ **WELCOME TO RAEL_KERTIA ENGINE v3.4.2** ⚔️\n\n"
         "The low-fee cross-chain sniper engine built to take market share.\n\n"
         "🔹 **Trading Fees:** `0.35%` (Trojan charges 1.0%)\n"
         "🔹 **Networks:** Base, Solana, Ethereum, BSC, Arbitrum\n\n"
@@ -333,7 +339,7 @@ def main():
         logger.critical("CRITICAL STOP: Production FEE_COLLECTOR_PUBKEY variable is missing or unset. Fee burn protection triggered.")
         sys.exit(1)
         
-    # Micro-Fix: Cryptographically validate the format of the fee destination public key at boot
+    # Cryptographically validate the format of the fee destination public key at boot
     try:
         Pubkey.from_string(FEE_COLLECTOR_PUBKEY)
     except Exception:
