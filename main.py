@@ -7,7 +7,7 @@ import httpx
 import sqlite3
 from cryptography.fernet import Fernet
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, CallbackQueryHandler
 from web3 import Web3
 
 # ===== LOGGING & STREAM SANITIZATION =====
@@ -148,6 +148,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "⚔️ **RAEL_KERTIA BOT v3.2 | LIVE**\n\n"
     msg += "0.35% Fees | Secure Encrypted User Wallets | 10% Referral Kickback\n\n"
     msg += "Commands:\n"
+    msg += "/trade - Interactive trading dashboard 📊\n"
     msg += "/wallet - View your private deposit address & balance\n"
     msg += "/referral - Access your partner network statistics\n"
     msg += "/scan [chain] [address] - Audit smart contract safety matrix\n"
@@ -157,11 +158,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    w = get_wallet(update.effective_user.id)
+    user_id = update.effective_user.id
+    w = get_wallet(user_id)
     msg = f"📥 **Your Dedicated Rael_Kertia Deposit Address:**\n\n"
     msg += f"`{w.address}`\n\n"
     msg += "⚠️ Gas and platform service fees (0.35%) are auto-deducted per trade execution."
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    
+    # Safely send message directly to active chat window to avoid missing-message runtime exceptions
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode="Markdown")
 
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -172,7 +176,8 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"• Registered Network Referrals: `{count} Users`\n"
     msg += f"• Total Earned Dividend Income: `{earned:.6f} ETH`\n\n"
     msg += "_System distributes exactly 10% of generated platform commissions straight to your partner index._"
-    await update.message.reply_text(msg, parse_mode='Markdown')
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -181,7 +186,7 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"🔍 **Rael_Kertia Diagnostic Panel**\n\n"
     msg += f"• Your Active Telegram ID: `{user_id}`\n"
     msg += f"• Memory Loaded Owner ID: `{OWNER_ID}`\n"
-    msg += f"• Raw Railway Environment Var: `{current_env}`\n\n"
+    msg += f"• Raw Railway Environment Var: {current_env}\n\n"
 
     if str(user_id) == str(current_env).strip():
         msg += "✅ **Match Status:** Verified. System honors Owner privileges."
@@ -190,6 +195,36 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    w = get_wallet(user_id)
+
+    msg = "⚡ **RAEL_KERTIA TRADE DASHBOARD**\n\n"
+    msg += f"Wallet: `{w.address[:6]}...{w.address[-4:]}`\n\n"
+    msg += "**Quick Actions:**\n"
+    msg += "• `/snipe [chain] [token] [amount]` - Buy tokens\n"
+    msg += "• `/scan [chain] [token]` - Audit before trading\n"
+    msg += "• `/price [chain] [token]` - Check live price\n\n"
+    msg += "_Fund your wallet via /wallet to begin trading._\n"
+    msg += "_0.35% platform fee applies per execution._"
+
+    buttons = [
+        [InlineKeyboardButton("📊 Scan Token", switch_inline_query_current_chat="base ")],
+        [InlineKeyboardButton("💰 View Wallet", callback_data="wallet")],
+        [InlineKeyboardButton("🎯 Referral Stats", callback_data="referral")]
+    ]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+
+# ===== CALLBACK INTERFACE ROUTER - ROBUST =====
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "wallet":
+        await wallet(update, context)
+    elif query.data == "referral":
+        await referral(update, context)
+
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_SCANS
     if not context.args or len(context.args) < 2:
@@ -197,9 +232,9 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chain_key = context.args[0].lower()
-    token_addr = context.args[1]
+    token_addr = context.args[1].strip().replace('\n', '').replace(' ', '')
 
-    if len(token_addr)!= 42 or not token_addr.startswith("0x"):
+    if len(token_addr) != 42 or not token_addr.startswith("0x"):
         await update.message.reply_text("❌ Invalid address format. Must be 42 characters starting with 0x", parse_mode="Markdown")
         return
 
@@ -248,7 +283,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
 
         if not data and not dex:
-            await status_msg.edit_text("❌ Token not found. Check chain and address.")
+            await status_msg.edit_text("❌ Token not found on GoPlus or DexScreener. Check chain and address.")
             return
 
         if not data and dex:
@@ -300,29 +335,33 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if update.message.chat.type!= 'private':
+    if update.message.chat.type != 'private':
         await update.message.reply_text("Trading triggers locked to private conversations to prevent group exploitation.")
         return
     if len(context.args) < 3:
         await update.message.reply_text("❌ Usage: `/snipe base 0x... 0.01`", parse_mode='Markdown')
         return
-    chain_key, token, amount_str = context.args[0].lower(), context.args[1], context.args[2]
+    chain_key, token, amount_str = context.args[0].lower(), context.args[1].strip().replace('\n', '').replace(' ', ''), context.args[2]
 
-    if len(token)!= 42 or not token.startswith("0x"):
+    if len(token) != 42 or not token.startswith("0x"):
         await update.message.reply_text("❌ Invalid address format. Must be 42 characters starting with 0x", parse_mode="Markdown")
         return
 
-    try: amount = float(amount_str)
-    except: await update.message.reply_text("❌ Amount must be a standard float value."); return
+    try: 
+        amount = float(amount_str)
+    except ValueError: 
+        await update.message.reply_text("❌ Amount must be a standard float value.")
+        return
     if chain_key not in CHAINS:
-        await update.message.reply_text("❌ Supported chains: eth, base, bsc, arb."); return
+        await update.message.reply_text("❌ Supported chains: eth, base, bsc, arb.")
+        return
 
     chain_id = CHAINS[chain_key]
     w = get_wallet(user_id)
     rpc_url = RPC_MAP[chain_id]
 
     # ===== OWNER BYPASS SYSTEM GATE =====
-    if user_id == OWNER_ID and OWNER_ID!= 0:
+    if user_id == OWNER_ID and OWNER_ID != 0:
         msg = f"🎯 **OWNER EXECUTION GATE**\n"
         msg += f"Simulating on-chain {amount} ETH acquisition on {chain_key.upper()}\n"
         msg += f"Balance Verification: BYPASSED\n\n"
@@ -362,7 +401,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ref_id = ref_row[0]
                     kickback = fee * REFERRAL_KICKBACK
                     local_conn.execute("INSERT OR IGNORE INTO referrals (user_id, earned) VALUES (?, 0.0)", (ref_id,))
-                    local_conn.execute("UPDATE referrals SET earned = earned +? WHERE user_id=?", (kickback, ref_id))
+                    local_conn.execute("UPDATE referrals SET earned = earned + ? WHERE user_id=?", (kickback, ref_id))
                     local_conn.commit()
 
             logger.info(f"Fee settlement complete: {fee_hash}")
@@ -378,8 +417,8 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip().split()
     if len(query) < 2: return
-    chain_key, address = query[0].lower(), query[1]
-    if len(address)!= 42 or not address.startswith("0x"): return
+    chain_key, address = query[0].lower(), query[1].strip()
+    if len(address) != 42 or not address.startswith("0x"): return
     if chain_key not in CHAINS: return
 
     chain_id = CHAINS[chain_key]
@@ -406,7 +445,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        input_message_content=InputTextMessageContent(content, parse_mode='Markdown'),
                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Execute Swap", url=f"https://t.me/{context.bot.username}")]]))]
             await update.inline_query.answer(results, cache_time=10)
-    except:
+    except Exception:
         return
 
 if __name__ == "__main__":
@@ -416,10 +455,12 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("wallet", wallet))
     application.add_handler(CommandHandler("referral", referral))
     application.add_handler(CommandHandler("myid", myid))
+    application.add_handler(CommandHandler("trade", trade))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("snipe", snipe))
     application.add_handler(CommandHandler("price", price))
     application.add_handler(InlineQueryHandler(inline_query))
+    application.add_handler(CallbackQueryHandler(handle_callback_query))
 
     logger.info("Platform routing tables established. Polling network endpoints...")
     application.run_polling(drop_pending_updates=True)
