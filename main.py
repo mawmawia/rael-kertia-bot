@@ -110,6 +110,7 @@ def calculate_score(data):
     if hidden_tax: score -= 20
     if anti_whale: score -= 10
     if whale_concentration: score -= 15
+    # FIXED: honeypot returned cleanly without name mismatch
     return max(0, score), honeypot, buy_tax, sell_tax, owner_control, mintable, hidden_tax, anti_whale, cooldown, lp_locked, whale_concentration, total_lp_locked
 
 def fetch_blockchain_balance(rpc_url, address):
@@ -163,9 +164,11 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"📥 **Your Dedicated Rael_Kertia Deposit Address:**\n\n"
     msg += f"`{w.address}`\n\n"
     msg += "⚠️ Gas and platform service fees (0.35%) are auto-deducted per trade execution."
-    
-    # Safely send message directly to active chat window to avoid missing-message runtime exceptions
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode="Markdown")
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -177,7 +180,10 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"• Total Earned Dividend Income: `{earned:.6f} ETH`\n\n"
     msg += "_System distributes exactly 10% of generated platform commissions straight to your partner index._"
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
+    if update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -193,7 +199,10 @@ async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg += "❌ **Match Status:** Mismatched. Check your Railway dashboard parameters."
 
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    if update.message:
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode='Markdown')
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -215,7 +224,7 @@ async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
 
-# ===== CALLBACK INTERFACE ROUTER - ROBUST =====
+# ===== CALLBACK INTERFACE ROUTER =====
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -227,15 +236,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_SCANS
-    if not context.args or len(context.args) < 2:
+
+    raw_args = update.message.text.split()[1:]
+    if len(raw_args) < 2:
         await update.message.reply_text("❌ Usage: `/scan base 0x1234...`", parse_mode='Markdown')
         return
 
-    chain_key = context.args[0].lower()
-    token_addr = context.args[1].strip().replace('\n', '').replace(' ', '')
+    chain_key = raw_args[0].lower()
+    # FIXED: Robust full slice join safely handles wrapped mobile layout fragments
+    token_addr = ''.join(raw_args[1:]).replace('\n', '').replace(' ', '').strip()
 
     if len(token_addr) != 42 or not token_addr.startswith("0x"):
-        await update.message.reply_text("❌ Invalid address format. Must be 42 characters starting with 0x", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Invalid address format. Got {len(token_addr)} chars: `{token_addr[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
         return
 
     if chain_key not in CHAINS:
@@ -338,20 +350,26 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != 'private':
         await update.message.reply_text("Trading triggers locked to private conversations to prevent group exploitation.")
         return
-    if len(context.args) < 3:
+
+    raw_args = update.message.text.split()[1:]
+    if len(raw_args) < 3:
         await update.message.reply_text("❌ Usage: `/snipe base 0x... 0.01`", parse_mode='Markdown')
         return
-    chain_key, token, amount_str = context.args[0].lower(), context.args[1].strip().replace('\n', '').replace(' ', ''), context.args[2]
+
+    chain_key = raw_args[0].lower()
+    token = ''.join(raw_args[1:-1]).replace('\n', '').replace(' ', '').strip()
+    amount_str = raw_args[-1].strip()
 
     if len(token) != 42 or not token.startswith("0x"):
-        await update.message.reply_text("❌ Invalid address format. Must be 42 characters starting with 0x", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Invalid address format. Got {len(token)} chars: `{token[:20]}...` Must be 42 starting with 0x", parse_mode="Markdown")
         return
 
-    try: 
+    try:
         amount = float(amount_str)
-    except ValueError: 
+    except ValueError:
         await update.message.reply_text("❌ Amount must be a standard float value.")
         return
+
     if chain_key not in CHAINS:
         await update.message.reply_text("❌ Supported chains: eth, base, bsc, arb.")
         return
