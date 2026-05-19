@@ -19,7 +19,13 @@ logger.info("⚡ RAEL_KERTIA: System initialization starting...")
 TOKEN = os.environ.get('BOT_TOKEN')
 ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY')
 DEV_COLD_WALLET = os.environ.get('DEV_COLD_WALLET')
-OWNER_ID = int(os.environ.get('OWNER_ID', '0'))
+
+# We safely pull this from Railway variables so you don't have to hardcode it
+try:
+    OWNER_ID = int(os.environ.get('OWNER_ID', '0'))
+except ValueError:
+    OWNER_ID = 0
+    logger.warning("⚠️ OWNER_ID variable is missing or contains non-numeric text in Railway panel.")
 
 if not all([TOKEN, ENCRYPTION_KEY, DEV_COLD_WALLET]):
     logger.critical("❌ Core environment variables missing from Railway config panel!"); sys.exit(1)
@@ -185,7 +191,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "/snipe [chain] [address] [amount_eth] - Execute Trade\n"
     msg += "/trade - Launch GUI Terminal\n"
     msg += "/price [chain] [address] - Live market data\n"
-    msg += "/myid - Debug system environment IDs"
+    msg += "/myid - Check and verify your Owner ID configurations"
     await update.message.reply_text(msg)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,15 +211,22 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "_You earn 10% of all fees from referred users._"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+# Zero-dependency dynamic system diagnostic utility
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await update.message.reply_text(
-        f"🔍 **ID Alignment Check**\n\n"
-        f"• Your Telegram ID: `{user_id}`\n"
-        f"• Assigned Owner ID: `{OWNER_ID}`\n\n"
-        f"Match Status: {'✅ MATCHED' if user_id == OWNER_ID else '❌ MISMATCHED'}",
-        parse_mode='Markdown'
-    )
+    raw_env = os.environ.get('OWNER_ID', 'NOT SET')
+    
+    msg = f"🔍 **Rael_Kertia Diagnostic Panel**\n\n"
+    msg += f"• Your Active Telegram ID: `{user_id}`\n"
+    msg += f"• Memory Loaded Owner ID: `{OWNER_ID}`\n"
+    msg += f"• Raw Railway Environment Var: `{raw_env}`\n\n"
+    
+    if str(user_id) == str(raw_env).strip():
+        msg += "✅ **Match Status:** Verified. System honors Owner Bypass privileges."
+    else:
+        msg += "❌ **Match Status:** Mismatched. Update your OWNER_ID on Railway with your actual Telegram ID number."
+        
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global TOTAL_SCANS
@@ -285,7 +298,7 @@ async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rpc_url = RPC_MAP[chain_id]
 
     # ===== OWNER BYPASS - SKIPS ALL CHECKS =====
-    if user_id == OWNER_ID:
+    if user_id == OWNER_ID and OWNER_ID != 0:
         msg = f"🎯 **OWNER TEST MODE - FREE PASS**\n"
         msg += f"Simulating {amount} ETH on {chain_key.upper()}\n"
         msg += f"Fee: 0.00 ETH | Balance Check: SKIPPED\n"
@@ -350,4 +363,45 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"• 1h Run: `{dex_data['priceChange1h']:+.2f}%` | 24h: `{dex_data['priceChange24h']:+.2f}%`\n"
     msg += f"• Vol 24h: `${dex_data['volume24h']:,.0f}`\n"
     msg += f"• Liquidity: `${dex_data['liquidity']:,.0f}`\n"
-    await update.message.reply_text(msg, parse_mode='Markdown
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚧 GUI Terminal coming soon. Use /snipe for now.")
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip().split()
+    if len(query) < 2: return
+    chain_key, address = query[0].lower(), query[1]
+    chain_id = CHAINS.get(chain_key, "1")
+    data = await get_token_data(chain_id, address)
+    if not data: return
+    score, hp, buy_tax, sell_tax, _, _, _, _, _, _, _, lp_p = calculate_score(data)
+    verdict = "VERIFIED ✅" if score > 75 else "ALERT 🚨"
+    title = f"{chain_key.upper()} Scan: {verdict} ({score}/100)"
+    desc = f"Tax: {buy_tax+sell_tax}% | LP: {lp_p:.0f}% | 0.35% fees"
+    content = f"⚔️ **Rael_Kertia Fast Scan**\n`{address[:10]}...` | {chain_key.upper()}\n"
+    content += f"Score: `{score}/100` | **{verdict}**\n"
+    content += f"Tax: `{buy_tax+sell_tax}%` | LP Lock: `{lp_p:.1f}%`\n"
+    content += f"⚡ Execution: 0.35% (65% cheaper than industry standards)"
+    results = [InlineQueryResultArticle(id=str(uuid.uuid4()), title=title, description=desc,
+               input_message_content=InputTextMessageContent(content, parse_mode='Markdown'),
+               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Execute Private Trading Node", url=f"https://t.me/{context.bot.username}")]]))]
+    await update.inline_query.answer(results, cache_time=10)
+
+if __name__ == "__main__":
+    logger.info("Initializing application processing channels...")
+    app = Application.builder().token(TOKEN).build()
+    
+    # Handlers registered carefully to avoid lifecycle blockages
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("wallet", wallet))
+    app.add_handler(CommandHandler("referral", referral))
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("scan", scan))
+    app.add_handler(CommandHandler("snipe", snipe))
+    app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("trade", trade))
+    app.add_handler(InlineQueryHandler(inline_query))
+    
+    logger.info("Active pipeline connected. Polling operational event fields...")
+    app.run_polling()
