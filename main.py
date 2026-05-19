@@ -42,14 +42,14 @@ SOLANA_RPC_URL = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.sola
 FEE_COLLECTOR_PUBKEY = os.environ.get("FEE_COLLECTOR_PUBKEY")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
 
-# Cryptographic Fail-safe: Enforce static environment keypresence
+# Cryptographic Fail-safe
 if not ENCRYPTION_KEY:
     logger.critical("CRITICAL CONFIG ERROR: ENCRYPTION_KEY environment variable is absent. Boot halted.")
     sys.exit(1)
 fernet = Fernet(ENCRYPTION_KEY.encode())
 
-# Fixed Competitive Fee Tier
-FEE_PERCENT = 0.0035  # 0.35% Platform Fees
+# Fixed Competitive Fee Tier (0.35%)
+FEE_PERCENT = 0.0035  
 
 # --- REGEX COMPILERS FOR UNIFIED TEXT LISTENER ---
 EVM_REGEX = r'^0x[a-fA-F0-9]{40}$'
@@ -80,7 +80,6 @@ init_db()
 
 # --- VALIDATION UTILITIES ---
 def is_valid_sol_address(addr: str) -> bool:
-    """Verifies if a string is a structurally sound Solana address to prevent text false-positives."""
     try:
         decoded = base58.b58decode(addr)
         return len(decoded) == 32
@@ -89,7 +88,6 @@ def is_valid_sol_address(addr: str) -> bool:
 
 # --- KEY MANAGEMENT & UTILITIES ---
 def get_evm_wallet(user_id: int):
-    """Retrieves or instantiates an encrypted EVM private wallet key."""
     with sqlite3.connect("wallets.db", timeout=10) as conn:
         row = conn.execute("SELECT enc_key FROM wallets WHERE user_id=?", (user_id,)).fetchone()
         if row and row[0]:
@@ -107,7 +105,6 @@ def get_evm_wallet(user_id: int):
         return new_account
 
 def get_solana_wallet(user_id: int):
-    """Retrieves or instantiates an encrypted Solana Keypair object."""
     with sqlite3.connect("wallets.db", timeout=10) as conn:
         row = conn.execute("SELECT enc_sol_key FROM wallets WHERE user_id=?", (user_id,)).fetchone()
         if row and row[0]:
@@ -126,11 +123,10 @@ def get_solana_wallet(user_id: int):
 
 # --- TELEGRAM UI UTILITIES ---
 async def safe_reply(update: Update, text: str, reply_markup=None):
-    """Ensures delivery regardless of callback vs message context origin."""
     if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
     elif update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 # --- COMMAND HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,17 +139,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.execute("INSERT INTO wallets (user_id, referrer) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET referrer=?", (user_id, ref_id, ref_id))
                 conn.commit()
 
+    # Fixed: Uses HTML syntax to completely prevent underscore/Markdown parse errors
     msg = (
-        "⚔️ **WELCOME TO RAEL_KERTIA ENGINE v3.4.2** ⚔️\n\n"
+        "⚔️ <b>WELCOME TO RAEL_KERTIA ENGINE v3.4.2</b> ⚔️\n\n"
         "The low-fee cross-chain sniper engine built to take market share.\n\n"
-        "🔹 **Trading Fees:** `0.35%` (Trojan charges 1.0%)\n"
-        "🔹 **Networks:** Base, Solana, Ethereum, BSC, Arbitrum\n\n"
-        "💡 *Just paste an EVM contract address or Solana token mint directly into this chat to begin trading instantly.*"
+        "🔹 <b>Trading Fees:</b> <code>0.35%</code> (Trojan charges 1.0%)\n"
+        "🔹 <b>Networks:</b> Base, Solana, Ethereum, BSC, Arbitrum\n\n"
+        "💡 <i>Just paste an EVM contract address or Solana token mint directly into this chat to begin trading instantly.</i>"
     )
     buttons = [
         [InlineKeyboardButton("💳 My Wallets", callback_data="wallet"), InlineKeyboardButton("👥 Referrals", callback_data="referral")]
     ]
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -161,10 +158,12 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sol_acct = get_solana_wallet(user_id)
     
     msg = (
-        "📥 **YOUR UNIQUE MULTI-CHAIN DEPOSIT WALLETS:**\n\n"
-        f"🌐 **EVM Base / ETH Wallet Address:**\n`{evm_acct.address}`\n\n"
-        f"☀️ **Solana Mint Pipeline Key:**\n`{sol_acct.pubkey()}`\n\n"
-        "⚠️ *Keep your keys funded. Platform commissions (0.35%) are extracted instantly upon execution.*"
+        "📥 <b>YOUR UNIQUE MULTI-CHAIN DEPOSIT WALLETS:</b>\n\n"
+        "🌐 <b>EVM Base / ETH Wallet Address:</b>\n"
+        f"<code>{evm_acct.address}</code>\n\n"
+        "☀️ <b>Solana Mint Pipeline Key:</b>\n"
+        f"<code>{sol_acct.pubkey()}</code>\n\n"
+        "⚠️ <i>Keep your keys funded. Platform commissions (0.35%) are extracted instantly upon execution.</i>"
     )
     await safe_reply(update, msg)
 
@@ -178,25 +177,24 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
         earned = row[0] if row else 0.0
 
     msg = (
-        "👥 **RAEL_KERTIA NETWORK DECENTRALIZATION LAYER:**\n\n"
-        f"Your Personal Invite Pipeline:\n`{ref_link}`\n\n"
-        f"💰 **Total Referral Profits Earned:** `{earned:.4f} EXT`\n\n"
+        "👥 <b>RAEL_KERTIA NETWORK DECENTRALIZATION LAYER:</b>\n\n"
+        f"Your Personal Invite Pipeline:\n<code>{ref_link}</code>\n\n"
+        f"💰 <b>Total Referral Profits Earned:</b> <code>{earned:.4f} EXT</code>\n\n"
         "When your references trade, you securely harvest a slice of our 0.35% fee pipeline directly into your wallet database passive ledger."
     )
     await safe_reply(update, msg)
 
-# --- UNIFIED AUTO-DETECT ADDRESS LISTENER (THE UX OVERHAUL) ---
+# --- UNIFIED AUTO-DETECT ADDRESS LISTENER ---
 async def auto_detect_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token_address = update.message.text.strip()
     
     if token_address.startswith("0x") and len(token_address) == 42:
-        chain = "base"  # Defaulting EVM tokens to Base for low retail fees
+        chain = "base"
         buy_buttons = [
             InlineKeyboardButton("🛒 Buy 0.05 ETH", callback_data=f"quickbuy_0.05_base_{token_address}"),
             InlineKeyboardButton("🛒 Buy 0.2 ETH", callback_data=f"quickbuy_0.2_base_{token_address}")
         ]
     else:
-        # Validate Solana structure explicitly before showing UI elements to weed out baseline text chatter
         if not is_valid_sol_address(token_address):
             return
             
@@ -207,10 +205,10 @@ async def auto_detect_address(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
         
     msg = (
-        f"⚡ **RAEL_KERTIA ENGINE: TOKEN RECOGNIZED**\n\n"
-        f"Network Cluster: `{chain.upper()}`\n"
-        f"Contract Target: `{token_address}`\n\n"
-        f"Select an automated metric action below:"
+        "⚡ <b>RAEL_KERTIA ENGINE: TOKEN RECOGNIZED</b>\n\n"
+        f"Network Cluster: <code>{chain.upper()}</code>\n"
+        f"Contract Target: <code>{token_address}</code>\n\n"
+        "Select an automated metric action below:"
     )
     
     buttons = [
@@ -218,11 +216,10 @@ async def auto_detect_address(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("📊 Automated Safety Audit", callback_data=f"quickscan_{chain}_{token_address}")],
         [InlineKeyboardButton("❌ Dismiss Interface", callback_data="cancel")]
     ]
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 # --- PRODUCTION SOLANA SWAP ENGINE (JUPITER NATIVE FEES V6) ---
 async def execute_solana_swap(user_id: int, token_address: str, amount_sol: float, slippage_bps: int = 100):
-    """Executes market swaps via native Jupiter API using internal platformFeeBps routing protocols."""
     try:
         sol_wallet = get_solana_wallet(user_id)
         user_pubkey = str(sol_wallet.pubkey())
@@ -230,14 +227,13 @@ async def execute_solana_swap(user_id: int, token_address: str, amount_sol: floa
         
         SOL_MINT = "So11111111111111111111111111111111111111112"
         
-        # Pass fees directly into the Quote API parameter route so Jupiter accounts for the calculation split
         quote_url = (
             f"https://quote-api.jup.ag/v6/quote?"
             f"inputMint={SOL_MINT}&"
             f"outputMint={token_address}&"
             f"amount={lamports}&"
             f"slippageBps={slippage_bps}&"
-            f"platformFeeBps=35"  # 35 Bps = 0.35% fee parameter split
+            f"platformFeeBps=35"
         )
         
         async with httpx.AsyncClient() as client:
@@ -246,14 +242,13 @@ async def execute_solana_swap(user_id: int, token_address: str, amount_sol: floa
                 return {"success": False, "error": f"Jupiter Route Failure: {quote_res.text[:80]}"}
             quote_data = quote_res.json()
             
-            # Map the feeAccount into the swap block payload alongside the compiled quote data object
             swap_payload = {
                 "quoteResponse": quote_data,
                 "userPublicKey": user_pubkey,
                 "wrapAndUnwrapSol": True,
                 "dynamicComputeUnitLimit": True,
                 "prioritizationFeeLamports": 65_000,
-                "feeAccount": FEE_COLLECTOR_PUBKEY  # Automated distribution destination address
+                "feeAccount": FEE_COLLECTOR_PUBKEY
             }
             
             swap_res = await client.post("https://quote-api.jup.ag/v6/swap", json=swap_payload)
@@ -264,7 +259,6 @@ async def execute_solana_swap(user_id: int, token_address: str, amount_sol: floa
             raw_tx_bytes = base64.b64decode(swap_data["swapTransaction"])
             versioned_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
             
-            # Sign the unified buffer payload block directly
             versioned_tx.sign([sol_wallet])
             
             async with AsyncClient(SOLANA_RPC_URL) as rpc_client:
@@ -278,11 +272,10 @@ async def execute_solana_swap(user_id: int, token_address: str, amount_sol: floa
 
 # --- MOCK EVM SNIPER LINK ---
 async def snipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder linking to your original clean EVM execution engine handler code."""
     chain = context.args[0]
     token = context.args[1]
     amount = context.args[2]
-    await safe_reply(update, f"🚀 *EVM Execution Success:* Sniping `{amount}` ETH into token `{token}` on network `{chain.upper()}`.")
+    await safe_reply(update, f"🚀 <b>EVM Execution Success:</b> Sniping <code>{amount}</code> ETH into token <code>{token}</code> on network <b>{chain.upper()}</b>.")
 
 # --- DYNAMIC CROSS-CHAIN CALLBACK ROUTER ---
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -291,7 +284,6 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     await query.answer()
     
-    # SECURITY GATEWAY: Zero administrative bypass shortcuts exist inside this loop.
     if data == "wallet":
         await wallet(update, context)
     elif data == "referral":
@@ -308,16 +300,17 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(amount_str)
         
         if chain_selection == "sol":
-            await query.message.reply_text(f"🚀 *Routing trade parameters to Jupiter Liquidity Engines for {amount} SOL...*", parse_mode="Markdown")
+            await query.message.reply_text(f"🚀 <i>Routing trade parameters to Jupiter Liquidity Engines for {amount} SOL...</i>", parse_mode="HTML")
             result = await execute_solana_swap(user_id=user_id, token_address=token_address, amount_sol=amount)
             
             if result["success"]:
                 await query.message.reply_text(
-                    f"✅ **Solana Order Filled!**\n\n🔗 [Review Receipt via Solscan](https://solscan.io/tx/{result['tx_hash']})",
-                    parse_mode="Markdown"
+                    f"✅ <b>Solana Order Filled!</b>\n\n🔗 <a href='https://solscan.io/tx/{result['tx_hash']}'>Review Receipt via Solscan</a>",
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
                 )
             else:
-                await query.message.reply_text(f"❌ **Jupiter Route Failure Matrix Rejected Transaction:**\n`{result['error']}`", parse_mode="Markdown")
+                await query.message.reply_text(f"❌ <b>Jupiter Route Failure Matrix Rejected Transaction:</b>\n<code>{result['error']}</code>", parse_mode="HTML")
         else:
             context.args = [chain_selection, token_address, amount_str]
             await snipe(update, context)
@@ -325,9 +318,9 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("quickscan_"):
         _, chain_selection, token_address = data.split("_")
         if chain_selection == "sol":
-            await query.message.reply_text(f"📊 *Running Solana Metadata Security Analysis on Mint:* `{token_address}`")
+            await query.message.reply_text(f"📊 <i>Running Solana Metadata Security Analysis on Mint:</i> <code>{token_address}</code>", parse_mode="HTML")
         else:
-            await query.message.reply_text(f"🛡️ *Pinging GoPlus Live Telemetry Layer for EVM Contract:* `{token_address}`")
+            await query.message.reply_text(f"🛡️ <i>Pinging GoPlus Live Telemetry Layer for EVM Contract:</i> <code>{token_address}</code>", parse_mode="HTML")
 
 # --- INITIALIZATION ENGINE BOOTSTRAP ---
 def main():
@@ -336,30 +329,29 @@ def main():
         sys.exit(1)
         
     if not FEE_COLLECTOR_PUBKEY or FEE_COLLECTOR_PUBKEY == "YOUR_CENTRAL_SOLANA_WALLET_ADDRESS":
-        logger.critical("CRITICAL STOP: Production FEE_COLLECTOR_PUBKEY variable is missing or unset. Fee burn protection triggered.")
+        logger.critical("CRITICAL STOP: Production FEE_COLLECTOR_PUBKEY variable is missing or unset.")
         sys.exit(1)
         
-    # Cryptographically validate the format of the fee destination public key at boot
     try:
         Pubkey.from_string(FEE_COLLECTOR_PUBKEY)
     except Exception:
-        logger.critical("CRITICAL STOP: FEE_COLLECTOR_PUBKEY is not a valid Solana public key layout string. Boot halted.")
+        logger.critical("CRITICAL STOP: FEE_COLLECTOR_PUBKEY is not a valid Solana public key.")
         sys.exit(1)
         
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Command Map
+    # Command Maps
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("wallet", wallet))
     app.add_handler(CommandHandler("referral", referral))
     
-    # The Unified 1-Click Multi-Chain Interceptor Line
+    # Unified Interceptor Line
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & (filters.Regex(EVM_REGEX) | filters.Regex(SOL_REGEX)), 
         auto_detect_address
     ))
     
-    # Central Event Manager
+    # Central Event Callback Manager
     app.add_handler(CallbackQueryHandler(handle_callbacks))
     
     logger.info("RAEL_KERTIA SYSTEM BOOT SEQUENCE: Core compilation loops running normally.")
