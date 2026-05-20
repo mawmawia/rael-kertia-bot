@@ -6,9 +6,9 @@ from cryptography.fernet import Fernet
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.system_program import transfer, TransferParams
+from solders.transaction import Transaction
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import TxOpts
-from solana.transaction import Transaction
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
@@ -214,10 +214,12 @@ async def withdraw_sol(user_id: int, to_addr: str, amount_sol: float):
     if bal.value < lamports + 5000:
         return None, f"Insufficient balance. You have {bal.value/1e9:.6f} SOL"
     
+    blockhash_resp = await sol_client.get_latest_blockhash()
     ix = transfer(TransferParams(from_pubkey=kp.pubkey(), to_pubkey=dest, lamports=lamports))
-    tx = Transaction().add(ix)
+    tx = Transaction.new_with_payer([ix], kp.pubkey())
+    tx.sign([kp], blockhash_resp.value.blockhash)
     
-    sig = await sol_client.send_transaction(tx, kp, opts=TxOpts(skip_preflight=True))
+    sig = await sol_client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True))
     log_withdraw(user_id, "SOL", to_addr, str(amount_sol), str(sig.value))
     return str(sig.value), None
 
