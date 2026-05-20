@@ -34,7 +34,9 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ============== INIT ==============
-fernet = Fernet(ENCRYPTION_KEY.encode() if ENCRYPTION_KEY else Fernet.generate_key())
+if not ENCRYPTION_KEY:
+    raise ValueError("ENCRYPTION_KEY missing. Generate: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
+fernet = Fernet(ENCRYPTION_KEY.encode())
 sol_client = AsyncClient(SOLANA_RPC)
 w3 = Web3(Web3.HTTPProvider(EVM_RPC))
 
@@ -127,6 +129,12 @@ def get_user_amount(user_id: int) -> float:
     conn.close()
     return row[0] if row else DEFAULT_SOL_AMOUNT
 
+def set_user_amount(user_id: int, amount: float):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT OR REPLACE INTO settings (user_id, sol_amount) VALUES (?,?)", (user_id, amount))
+    conn.commit()
+    conn.close()
+
 # ============== REFERRAL UTILS ==============
 def get_or_create_ref(user_id: int):
     conn = sqlite3.connect(DB_PATH)
@@ -175,7 +183,8 @@ async def jupiter_swap(user_id: int, input_mint: str, output_mint: str, amount: 
         }
         async with session.post("https://quote-api.jup.ag/v6/swap", json=swap_payload) as r:
             if r.status!= 200:
-                return None, "Jupiter swap build failed"
+                txt = await r.text()
+                return None, f"Jupiter swap build failed: {txt}"
             swap_data = await r.json()
         
         from base64 import b64decode
@@ -224,8 +233,10 @@ def withdraw_evm(user_id: int, to_addr: str, amount_eth: float):
     acct = w3.eth.account.from_key(pk_hex)
     
     bal = w3.eth.get_balance(acct.address)
-    if bal < wei_amount:
-        return None, f"Insufficient balance. You have {w3.from_wei(bal, 'ether'):.6f} ETH"
+    gas_price = w3.eth.gas_price
+    gas_cost = 21000 * gas_price
+    if bal < wei_amount + gas_cost:
+        return None, f"Insufficient balance. Need {w3.from_wei(wei_amount + gas_cost, 'ether'):.6f} ETH for amount + gas"
     
     nonce = w3.eth.get_transaction_count(acct.address)
     tx = {
@@ -233,7 +244,7 @@ def withdraw_evm(user_id: int, to_addr: str, amount_eth: float):
         'to': to_addr,
         'value': wei_amount,
         'gas': 21000,
-        'gasPrice': w3.eth.gas_price
+        'gasPrice': gas_price
     }
     
     signed_tx = acct.sign_transaction(tx)
@@ -294,10 +305,7 @@ async def set_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid amount. Must be between 0 and 1000 SOL.")
         return
     
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT OR REPLACE INTO settings (user_id, sol_amount) VALUES (?,?)", (user_id, amount))
-    conn.commit()
-    conn.close()
+    set_user_amount(user_id, amount)
     await update.message.reply_text(f"✅ Trade size set to {amount} SOL")
 
 async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,7 +317,7 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sol_addr, _ = get_wallet(user_id, "solana")
         evm_addr, _ = get_wallet(user_id, "evm")
         user_amount = get_user_amount(user_id)
-        text = f"<b>Your Wallets</b>\n\n<b>SOL:</b> <code>{sol_addr}</code>\n<b>EVM:</b> <code>{evm_addr}</code>\n\n<b>Trade Size:</b> {user_amount} SOL\n/setamount to change"
+        text = f"<b>Your Wallets</b>\n\n<b>SOL:</b> <code>{sol_addr}</code>\n<b>EVM:</b> <code>{evm_addr}</code>\n\n<b>Trade Size:</b> {user_amount} SOL\nUse /setamount to change"
         await query.edit_message_text(text, parse_mode=ParseMode.HTML)
     
     elif query.data == "referrals":
@@ -335,43 +343,45 @@ async def withdraw_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid amount. Must be positive number.")
         return
     
-    await update.message.reply_text("Processing withdrawal...")
+    msg = await update.message.reply_text("Processing withdrawal...")
     
     if chain == "SOL":
         sig, err = await withdraw_sol(user_id, to_addr, amount)
         if err:
-            await update.message.reply_text(f"Failed: {err}")
+            await msg.edit_text(f"Failed: {err}")
         else:
-            await update.message.reply_text(f"Sent {amount} SOL\nTx: https://solscan.io/tx/{sig}")
+            await msg.edit_text(f"Sent {amount} SOL\nTx: https://solscan.io/tx/{sig}")
     
     elif chain == "EVM":
         sig, err = withdraw_evm(user_id, to_addr, amount)
         if err:
-            await update.message.reply_text(f"Failed: {err}")
+            await msg.edit_text(f"Failed: {err}")
         else:
-            await update.message.reply_text(f"Sent {amount} ETH\nTx: https://basescan.org/tx/{sig}")
+            await msg.edit_text(f"Sent {amount} ETH\nTx: https://basescan.org/tx/{sig}")
     else:
-        await update.message.reply_text("Chain must be SOL or EVM")
+        await msg.edit_text("Chain must be SOL or EVM")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    # Solana token mint
     if re.match(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$", text):
         amount_sol = get_user_amount(user_id)
         amount = int(amount_sol * 1_000_000_000)
         sol_mint = "So11111111111111112"
         
-        await update.message.reply_text(f"Executing {amount_sol} SOL swap...")
+        msg = await update.message.reply_text(f"Executing {amount_sol} SOL swap...")
         sig, err = await jupiter_swap(user_id, sol_mint, text, amount)
         if err:
-            await update.message.reply_text(f"Error: {err}")
+            await msg.edit_text(f"Error: {err}")
         else:
-            await update.message.reply_text(f"Swap confirmed: https://solscan.io/tx/{sig}")
+            await msg.edit_text(f"Swap confirmed: https://solscan.io/tx/{sig}")
         return
     
+    # EVM address
     if w3.is_address(text):
-        await update.message.reply_text("EVM trading module in development. You can withdraw with /withdraw EVM.")
+        await update.message.reply_text("EVM trading module in development. You can withdraw with /withdraw EVM 0.1 <address>")
         return
     
     await update.message.reply_text("Send a token address to trade, or use /setamount /withdraw")
