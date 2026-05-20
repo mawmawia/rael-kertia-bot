@@ -2,14 +2,13 @@ import os
 import logging
 import asyncio
 import sqlite3
-import json
 import base64
 from typing import Optional
 import aiohttp
 from cryptography.fernet import Fernet
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
@@ -24,7 +23,7 @@ FEE_COLLECTOR_PUBKEY = os.getenv("FEE_COLLECTOR_PUBKEY")
 SOLANA_RPC = os.getenv("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 EVM_RPC = os.getenv("EVM_RPC", "https://mainnet.infura.io/v3/YOUR_KEY")
 
-FEE_BPS = 35 # 0.35%
+FEE_BPS = 35
 DB_PATH = "wallets.db"
 JUPITER_API = "https://quote-api.jup.ag/v6"
 JUPITER_PRICE_API = "https://price.jup.ag/v4/price"
@@ -131,12 +130,14 @@ async def jupiter_swap(sol_key: str, input_mint: str, output_mint: str, amount: 
         if FEE_COLLECTOR_PUBKEY:
             try:
                 fee_account = str(Pubkey.find_program_address(
-                    [bytes(Pubkey.from_string(FEE_COLLECTOR_PUBKEY)), bytes(Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")), bytes(Pubkey.from_string(input_mint))],
+                    [bytes(Pubkey.from_string(FEE_COLLECTOR_PUBKEY)), 
+                     bytes(Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")), 
+                     bytes(Pubkey.from_string(input_mint))],
                     Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
                 )[0])
                 quote_params["feeAccount"] = fee_account
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Fee account calc failed: {e}")
         
         async with session.get(f"{JUPITER_API}/quote", params=quote_params) as resp:
             quote = await resp.json()
@@ -164,11 +165,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not wallet or not wallet["sol"]:
         kp = Keypair()
         save_wallet(user_id, sol_key=base64.b64encode(bytes(kp)).decode())
-        msg = f"🔥 RAEL_KERTIA v3.7.1 Online\n\nNew Solana wallet created:\n{kp.pubkey()}\n\nFund it with SOL to trade. Use /wallet to see addresses.\nUse /buy <mint> <sol_amount> <sl%> <tp%>"
+        msg = f"RAEL_KERTIA ENGINE v3.7.1 Online\n\nNew Solana wallet created:\n{kp.pubkey()}\n\nFund it with SOL to trade. Use /wallet to see addresses.\nUse /buy <mint> <sol_amount> <sl%> <tp%>"
         await update.message.reply_text(msg)
     else:
         kp = Keypair.from_base58_string(wallet["sol"])
-        msg = f"🔥 RAEL_KERTIA v3.7.1\n\nWallet: {kp.pubkey()}\n\nCommands:\n/buy <mint> <sol> <sl%> <tp%>\n/wallet\n/positions"
+        msg = f"RAEL_KERTIA ENGINE v3.7.1\n\nWallet: {kp.pubkey()}\n\nCommands:\n/buy <mint> <sol> <sl%> <tp%>\n/wallet\n/positions"
         await update.message.reply_text(msg)
 
 async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,7 +179,7 @@ async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No wallet. Use /start first.")
         return
     
-    msg = "💼 Your Wallets\n\n"
+    msg = "Your Wallets\n\n"
     if wallet["sol"]:
         kp = Keypair.from_base58_string(wallet["sol"])
         msg += f"Solana: {kp.pubkey()}\n"
@@ -205,13 +206,13 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /buy <mint> <sol_amount> <sl%> <tp%>\nExample: /buy EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 0.1 10 20")
         return
     
-    await update.message.reply_text("🔄 Building swap...")
+    await update.message.reply_text("Building swap...")
     
     try:
         lamports = int(sol_amount * 1e9)
         entry_price = await get_sol_price(mint)
         if not entry_price:
-            await update.message.reply_text("❌ Could not fetch token price.")
+            await update.message.reply_text("Could not fetch token price.")
             return
         
         sl_price = entry_price * (1 - sl_pct / 100)
@@ -219,18 +220,20 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         sig = await jupiter_swap(
             wallet["sol"], 
-            "So11111111111111111111111111111111111111112",
+            "So11111111111111112",
             mint, 
             lamports
         )
         
         add_position(user_id, "solana", "SOL", mint, str(lamports), entry_price, sl_price, tp_price)
         
-        msg = f"✅ Buy executed\n\nToken: {mint}\nEntry: ${entry_price:.6f}\nSL: ${sl_price:.6f} (-{sl_pct}%)\nTP: ${tp_price:.6f} (+{tp_pct}%)\nTx: https://solscan.io/tx/{sig}\n\nMonitoring active."
+        msg = f"Buy executed\n\nToken: {mint}\nEntry: ${entry_price:.6f}\nSL: ${sl_price:.6f} (-{sl_pct}%)\nTP: ${tp_price:.6f} (+{tp_pct}%)\nTx: https://solscan.io/tx/{sig}\n\nMonitoring active."
         await update.message.reply_text(msg)
     except Exception as e:
         logger.error(f"Buy error: {e}")
-        await update.message.reply_text(f"❌ Swap failed: {str(e)}")
+        await update.message.reply_text(f"Swap failed: {str(e)}")
+        if OWNER_ID:
+            await context.bot.send_message(OWNER_ID, f"Buy failed for user {user_id}: {e}")
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -244,7 +247,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No open positions.")
         return
     
-    msg = "📊 Open Positions\n\n"
+    msg = "Open Positions\n\n"
     for row in rows:
         msg += f"Token: {row[0]}\nEntry: ${row[1]:.6f}\nSL: ${row[2]:.6f}\nTP: ${row[3]:.6f}\n\n"
     await update.message.reply_text(msg)
@@ -274,18 +277,18 @@ async def monitor_loop(app: Application):
                 if triggered:
                     wallet = get_wallet(user_id)
                     if wallet and wallet["sol"]:
-                        await app.bot.send_message(user_id, f"⚠️ {triggered} triggered for {token_out} at ${current_price:.6f}\nClosing position...")
+                        await app.bot.send_message(user_id, f"{triggered} triggered for {token_out} at ${current_price:.6f}\nClosing position...")
                         try:
                             await jupiter_swap(
                                 wallet["sol"],
                                 token_out,
-                                "So11111111111111111111111111111111111111112",
+                                "So11111111111111111111111111112",
                                 int(amount_in)
                             )
                             close_position(pos_id)
-                            await app.bot.send_message(user_id, f"✅ Position closed via {triggered}")
+                            await app.bot.send_message(user_id, f"Position closed via {triggered}")
                         except Exception as e:
-                            await app.bot.send_message(user_id, f"❌ Failed to close: {e}")
+                            await app.bot.send_message(user_id, f"Failed to close: {e}")
                             if OWNER_ID:
                                 await app.bot.send_message(OWNER_ID, f"Close failed for user {user_id}: {e}")
             
@@ -293,7 +296,7 @@ async def monitor_loop(app: Application):
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
             if OWNER_ID:
-                await app.bot.send_message(OWNER_ID, f"🚨 Monitor crashed: {e}")
+                await app.bot.send_message(OWNER_ID, f"Monitor crashed: {e}")
             await asyncio.sleep(60)
 
 # ============== MAIN ==============
